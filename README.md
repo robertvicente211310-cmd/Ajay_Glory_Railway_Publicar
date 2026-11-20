@@ -75,3 +75,10 @@ Nota: este paquete mantiene el motor y las regiones originales de Ajay. No se su
 ## Renovación de tokens desde Telegram
 
 En el panel hay una acción **RENOVAR TOKENS VENCIDOS** y cada cuenta tiene su propio botón **Renovar UID** en la lista de cuentas. La renovación funciona cuando la cuenta conserva UID y contraseña de invitado; el motor vuelve a autenticarse, guarda las credenciales nuevas y, si Glory está activo, reinicia el worker de esa cuenta. Las cuentas importadas únicamente con un access token no pueden recuperar un token ya vencido a partir del mismo token: se debe importar un token vigente o las credenciales UID/contraseña. La renovación masiva procesa las cuentas una por una y muestra los resultados.
+
+
+## Importación individual de cuentas (Telegram)
+
+El panel incluye el botón **AGREGAR CUENTA**. Acepta archivos JSON `.dat` con `guest_account_info` (UID y contraseña de invitado), JSON con `uid`/`password` o `token`, y respaldos JSON de Ajay Glory. También permite entrada manual con `UID:CONTRASEÑA` o `TOKEN:token`.
+
+Cada cuenta se valida con el motor de autenticación y el bot responde con nombre, UID, nivel y región obtenidos del perfil. Las credenciales se guardan en `accounts.json`; no se muestran en el mensaje de confirmación. Importar una cuenta no la envía automáticamente a un clan ni inicia partidas.

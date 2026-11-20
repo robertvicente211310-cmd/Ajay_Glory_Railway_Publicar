@@ -35,7 +35,7 @@ TOKEN_CACHE_TTL = 4500
 
 START_MATCH_INTERVAL    = 4.0
 NEW_MATCH_DELAY         = 6.0
-MAX_MATCH_DURATION      = 3000
+MAX_MATCH_DURATION      = 4000
 MATCH_IDLE_TIMEOUT      = 90.0
 EXP_REFRESH_INTERVAL    = 30.0
 EXP_REFRESH_AFTER_MATCH_DELAY = 9.0
@@ -3071,6 +3071,23 @@ async def main():
         bot_state.glory_started = True
         print_success(f"Glory workers started: {started} account(s)")
 
+    async def on_import_account(data):
+        """Valida credenciales importadas y devuelve el perfil real de la cuenta."""
+        if data.get("uid") and data.get("password"):
+            ad = await process_account_uid_pass(str(data["uid"]).strip(), str(data["password"]).strip())
+        elif data.get("token"):
+            ad = await process_account_token(str(data["token"]).strip())
+        else:
+            return None
+        if not ad:
+            return None
+        return {
+            "account_id": str(ad.get("account_id", "")),
+            "nickname": ad.get("nickname", ""),
+            "region": ad.get("region", ""),
+            "level": int(ad.get("level", 1) or 1),
+        }
+
     async def on_account_added(data):
         # New accounts added after setup can start immediately. Before setup,
         # they are simply stored in accounts.json and picked up on setup.
@@ -3090,6 +3107,7 @@ async def main():
 
     try:
         bot_state.refresh_callbacks["on_account_added"] = on_account_added
+        bot_state.refresh_callbacks["on_import_account"] = on_import_account
         bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account
         bot_state.refresh_callbacks["on_glory_start"] = start_all_glory_workers
     except Exception:
