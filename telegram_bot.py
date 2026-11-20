@@ -13,7 +13,7 @@ from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
                           ContextTypes)
 
-from dashboard_server import bot_state
+from dashboard_server import bot_state, _run_automation
 
 
 def _admin_ids() -> set[int]:
@@ -51,6 +51,7 @@ class TelegramControl:
             [InlineKeyboardButton("▶️ INICIAR GLORY", callback_data="glory:start"), InlineKeyboardButton("⏹ DETENER GLORY", callback_data="glory:stop")],
             [InlineKeyboardButton("📊 ESTADÍSTICAS", callback_data="view:stats"), InlineKeyboardButton("👥 CUENTAS", callback_data="view:accounts:0")],
             [InlineKeyboardButton("🏆 EXPERIENCIA EXP", callback_data="view:exp"), InlineKeyboardButton("🏰 CONFIGURACIÓN DEL GREMIO", callback_data="view:guild")],
+            [InlineKeyboardButton("🚀 GENERAR + CLAN + JUGAR", callback_data="automation:help"), InlineKeyboardButton("🔄 PROGRESO", callback_data="view:automation")],
             [InlineKeyboardButton("📋 REGISTRO DE ACTIVIDAD", callback_data="view:logs"), InlineKeyboardButton("🔄 ACTUALIZAR", callback_data="panel")],
             [InlineKeyboardButton("⚙️ CONFIGURACIÓN", callback_data="view:config")],
         ]
@@ -169,6 +170,10 @@ class TelegramControl:
         elif kind == "logs":
             lines = [f"[{e.get('time','')}] {e.get('message','')}" for e in bot_state.logs[-30:]]
             text, markup = "📋 <b>REGISTRO DE ACTIVIDAD</b>\n\n" + ("\n".join(lines) if lines else "Sin actividad."), InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Actualizar", callback_data="view:logs"), InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
+        elif kind == "automation":
+            a = bot_state.automation
+            text = ("🚀 <b>AUTOMATIZACIÓN</b>\n\n" f"Estado: {a.get('stage','idle')}\n" f"Mensaje: {a.get('message','')}\n" f"Generadas: {a.get('created',0)}/{a.get('target',0)}\n" f"Unidas al clan: {a.get('joined',0)}\n" f"Fallidas: {a.get('failed',0)}")
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Actualizar", callback_data="view:automation"), InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
         else:
             text = "⚙️ <b>CONFIGURACIÓN</b>\n\nVariables: TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_IDS, DATA_DIR.\nUsa /id para consultar tu ID."
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
@@ -182,6 +187,8 @@ class TelegramControl:
         data = query.data or ""
         if data == "panel": return await self.send_panel(update, edit=True)
         if data == "glory:start": return await query.edit_message_text(await self.start_glory(update), reply_markup=self.panel())
+        if data == "automation:help":
+            return await query.edit_message_text("🚀 <b>GENERAR + CLAN + JUGAR</b>\n\nUsa el comando:\n<code>/generar CANTIDAD HILOS ID_CLAN REGION</code>\n\nEjemplo: <code>/generar 4 2 2068400598 NA</code>\n\nEl flujo usa el generador original, consulta el clan, envía las cuentas al clan y arranca los workers de Glory.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
         if data.startswith("delete:yes:"):
             uid = data.split(":", 2)[2]
             if (update.effective_user.id, uid) not in self.pending_deletes:
@@ -200,6 +207,25 @@ class TelegramControl:
             text, markup = await self.accounts_text(0); await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
     async def command_stats(self, update, context):
         if await self.reject_or_continue(update): await update.effective_message.reply_text(await self.stats_text(), parse_mode=ParseMode.HTML)
+    async def command_generate(self, update, context):
+        if not await self.reject_or_continue(update): return
+        if bot_state.automation.get("running"):
+            await update.effective_message.reply_text("Ya hay una automatización en curso. Usa el botón PROGRESO.")
+            return
+        if not context.args or not context.args[0].isdigit():
+            await update.effective_message.reply_text("Uso: /generar CANTIDAD [HILOS] [ID_CLAN] [REGION]\nEjemplo: /generar 4 2 2068400598 NA\nTambién puedes guardar el clan con /gremio ID REGION y usar /generar 4 2.")
+            return
+        total = max(1, min(1000, int(context.args[0])))
+        threads = max(1, min(30, int(context.args[1]))) if len(context.args) > 1 and context.args[1].isdigit() else min(5, total)
+        guild = bot_state.guild_config or {}
+        guild_id = str(context.args[2]).strip() if len(context.args) > 2 else str(guild.get("guild_id", "")).strip()
+        region = str(context.args[3]).strip().upper() if len(context.args) > 3 else str(guild.get("region", "IND")).upper()
+        if not guild_id:
+            await update.effective_message.reply_text("Falta el ID del clan. Usa /gremio ID REGION o incluye ID_CLAN en /generar.")
+            return
+        bot_state.automation_task = asyncio.create_task(_run_automation(guild_id, region, total, threads, True))
+        await update.effective_message.reply_text(f"Automatización iniciada: generar {total} cuenta(s), enviar al clan {guild_id} ({region}) y comenzar Glory. Usa PROGRESO para consultar.")
+
     async def command_delete(self, update, context):
         if not await self.reject_or_continue(update): return
         if not context.args:
@@ -252,7 +278,7 @@ class TelegramControl:
         await update.effective_message.reply_text(f"Gremio guardado: {guild_id} ({region}).")
 
     async def help_command(self, update, context):
-        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
+        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
 
     async def notify(self, message: str, level: str = "info"):
         if not self.application or not _admin_ids(): return
@@ -279,6 +305,7 @@ class TelegramControl:
         self.application.add_handler(CommandHandler("stats", self.command_stats))
         self.application.add_handler(CommandHandler("logs", self.command_logs))
         self.application.add_handler(CommandHandler("eliminar", self.command_delete))
+        self.application.add_handler(CommandHandler("generar", self.command_generate))
         self.application.add_handler(CommandHandler("gremio", self.command_guild))
         self.application.add_handler(CommandHandler("ayuda", self.help_command))
         self.application.add_handler(CallbackQueryHandler(self.callback))

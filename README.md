@@ -20,7 +20,7 @@ Sin `TELEGRAM_BOT_TOKEN`, el motor y el panel web siguen arrancando, pero Telegr
 3. Añade ese número a `TELEGRAM_ADMIN_IDS` y reinicia el servicio.
 4. Usa `/start`. Los comandos administrativos y todos los botones verifican el ID; los usuarios no autorizados son rechazados.
 
-Comandos: `/start`, `/id`, `/status`, `/iniciar`, `/detener`, `/cuentas`, `/stats`, `/logs`, `/eliminar UID`, `/gremio ID REGION`, `/ayuda`. La eliminación exige confirmación mediante botón.
+Comandos: `/start`, `/id`, `/status`, `/iniciar`, `/detener`, `/cuentas`, `/stats`, `/logs`, `/generar CANTIDAD HILOS ID_CLAN REGION`, `/eliminar UID`, `/gremio ID REGION`, `/ayuda`. La eliminación exige confirmación mediante botón.
 
 El panel incluye inicio/parada segura, estadísticas del motor real, cuentas paginadas sin contraseñas/tokens, EXP, configuración del gremio y actividad. Las notificaciones importantes se deduplican durante un intervalo para evitar spam.
 
@@ -48,3 +48,7 @@ Después conecta el repositorio en Railway o pulsa **Redeploy**. Los datos impor
 ## Verificaciones realizadas
 
 Se verificó la compilación sintáctica con `python3 -m compileall`. No se afirma una conexión real a Telegram, una autenticación de juego ni una partida real porque requieren un token de BotFather, IDs autorizados, cuentas y servicios externos configurados por el propietario.
+
+## Generar cuentas, unir al clan y jugar
+
+El botón **GENERAR + CLAN + JUGAR** muestra el formato del comando. Ejemplo: `/generar 4 2 2068400598 NA`. El flujo reutiliza `gen.py` y `dashboard_server._run_automation`: genera las cuentas, consulta la información del clan, envía las solicitudes de unión y finalmente llama al callback original `on_glory_start`. El botón **PROGRESO** muestra la etapa, cuentas creadas, unidas y fallidas.
