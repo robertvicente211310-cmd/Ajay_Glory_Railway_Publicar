@@ -58,3 +58,20 @@ El botón **GENERAR + CLAN + JUGAR** muestra el formato del comando. Ejemplo: `/
 En el panel usa **📤 EXPORTAR CUENTAS** para recibir un respaldo JSON privado. También puedes usar `/exportar`. El archivo incluye las cuentas persistentes, caché de tokens, dispositivos, configuración del clan, cuentas bloqueadas y estado visible. Los tokens y contraseñas son secretos: no compartas el archivo ni lo subas a GitHub.
 
 Para restaurar, pulsa **📥 IMPORTAR CUENTAS**, adjunta el JSON exportado o usa `/importar` y después adjunta el archivo. La importación fusiona por UID/token, no borra las cuentas existentes y conserva el orden del respaldo. Si Glory está activo, las cuentas importadas se reinician con el motor original y vuelven a organizarse en escuadras automáticamente.
+
+## Seguimiento separado de puntos del clan
+
+- `/meta_clan 4500` establece la meta que se muestra para cada cuenta (se guarda en `clan_points.json`).
+- `/puntos` muestra el registro individual.
+- `/puntos UID CANTIDAD` registra/actualiza manualmente los puntos del clan de esa cuenta.
+- Los puntos del clan son independientes de la EXP y del nivel de cuenta. Este registro es manual; no consulta automáticamente los puntos del juego ni desconecta cuentas al alcanzar la meta.
+
+## Importación desde archivos KING BOT
+
+El importador acepta una lista JSON de objetos con `uid` y `password` (como el `accounts.json` de KING BOT), además del respaldo completo de Ajay. Fusiona por UID, conserva las cuentas existentes, evita duplicados, respeta la región guardada en cada cuenta y agrega los registros al pool persistente. Si Glory está activo, solicita al callback del motor que incorpore cada cuenta importada. La exportación entrega un JSON descargable desde Telegram e incluye el registro de puntos del clan.
+
+Nota: este paquete mantiene el motor y las regiones originales de Ajay. No se sustituyó el generador de cuentas por el generador de KING BOT ni se añadió automatización de creación masiva o de partidas para acumular puntos. La gestión/importación/exportación y el registro de progreso quedan separados de ese proceso.
+
+## Renovación de tokens desde Telegram
+
+En el panel hay una acción **RENOVAR TOKENS VENCIDOS** y cada cuenta tiene su propio botón **Renovar UID** en la lista de cuentas. La renovación funciona cuando la cuenta conserva UID y contraseña de invitado; el motor vuelve a autenticarse, guarda las credenciales nuevas y, si Glory está activo, reinicia el worker de esa cuenta. Las cuentas importadas únicamente con un access token no pueden recuperar un token ya vencido a partir del mismo token: se debe importar un token vigente o las credenciales UID/contraseña. La renovación masiva procesa las cuentas una por una y muestra los resultados.

@@ -57,6 +57,7 @@ class TelegramControl:
             [InlineKeyboardButton("🏰 CONFIGURACIÓN DEL GREMIO", callback_data="view:guild"), InlineKeyboardButton("🤝 AMISTADES AUTO", callback_data="view:friends")],
             [InlineKeyboardButton("🚀 GENERAR + CLAN + JUGAR", callback_data="wizard:start"), InlineKeyboardButton("🔄 PROGRESO", callback_data="view:automation")],
             [InlineKeyboardButton("📤 EXPORTAR CUENTAS", callback_data="data:export"), InlineKeyboardButton("📥 IMPORTAR CUENTAS", callback_data="data:import")],
+            [InlineKeyboardButton("🔑 RENOVAR TOKENS VENCIDOS", callback_data="token:refresh:all")],
             [InlineKeyboardButton("📋 REGISTRO DE ACTIVIDAD", callback_data="view:logs"), InlineKeyboardButton("🔄 ACTUALIZAR", callback_data="panel")],
             [InlineKeyboardButton("⚙️ CONFIGURACIÓN", callback_data="view:config")],
         ]
@@ -133,7 +134,13 @@ class TelegramControl:
         level = html.escape(str(acc.get("level", "?")))
         exp = int(acc.get("current_exp", acc.get("exp", 0)) or 0)
         gained = int(acc.get("gained_exp", 0) or 0)
-        return f"• <b>{nick}</b> — UID {html.escape(uid)}\n  Estado: {status} | Nivel: {level} | EXP: {exp:,} (+{gained:,})"
+        points_cfg = self._clan_points_config()
+        clan_points = int(points_cfg.get("accounts", {}).get(uid, acc.get("clan_points", 0)) or 0)
+        target = int(points_cfg.get("target", 4500) or 4500)
+        remaining = max(0, target - clan_points)
+        return (f"• <b>{nick}</b> — UID {html.escape(uid)}\n"
+                f"  Estado: {status} | Nivel: {level} | EXP: {exp:,} (+{gained:,})\n"
+                f"  🏰 Puntos clan: {clan_points:,}/{target:,} (faltan {remaining:,})")
 
     async def accounts_text(self, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
         accounts = sorted(bot_state.accounts.values(), key=lambda a: str(a.get("uid", "")))
@@ -142,12 +149,68 @@ class TelegramControl:
         subset = accounts[page * self._page_size:(page + 1) * self._page_size]
         text = f"👥 <b>CUENTAS</b> — página {page + 1}/{total_pages}\n\n"
         text += "\n\n".join(self.safe_account(a) for a in subset) if subset else "No hay cuentas cargadas."
+        rows = []
+        for acc in subset:
+            uid = str(acc.get("uid", "")).strip()
+            if uid:
+                rows.append([InlineKeyboardButton(f"🔑 Renovar UID {uid[:18]}", callback_data=f"token:refresh:{uid}")])
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("◀️", callback_data=f"view:accounts:{page-1}"))
         nav.append(InlineKeyboardButton("🔄", callback_data=f"view:accounts:{page}"))
         if page + 1 < total_pages: nav.append(InlineKeyboardButton("▶️", callback_data=f"view:accounts:{page+1}"))
         nav.append(InlineKeyboardButton("⬅️ Panel", callback_data="panel"))
-        return text, InlineKeyboardMarkup([nav])
+        rows.append(nav)
+        return text, InlineKeyboardMarkup(rows)
+
+    async def refresh_account_token(self, uid: str) -> str:
+        uid = str(uid).strip()
+        ad = bot_state.account_credentials.get(uid)
+        if not isinstance(ad, dict):
+            return f"UID {uid}: no encuentro credenciales guardadas. Reimporta la cuenta con UID y contraseña."
+        auth_uid = str(ad.get("auth_uid") or "").strip()
+        auth_password = str(ad.get("auth_password") or "").strip()
+        if not (auth_uid and auth_password):
+            return f"UID {uid}: esta cuenta solo tiene un token. Si ya venció, no se puede regenerar desde ese mismo token; importa un token nuevo o las credenciales UID/contraseña."
+        relogin = getattr(bot_state, "relogin_account", None)
+        if not relogin:
+            return f"UID {uid}: el servicio de reautenticación no está disponible."
+        try:
+            fresh = await relogin(uid, ad)
+            if not fresh:
+                return f"UID {uid}: Garena no entregó credenciales nuevas. Revisa el registro de actividad."
+            worker = bot_state.account_workers.get(auth_uid)
+            if worker and not worker.done():
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+            cb = bot_state.refresh_callbacks.get("on_account_added")
+            if bot_state.glory_started and cb:
+                await cb({"uid": auth_uid, "password": auth_password})
+            return f"UID {uid}: token renovado correctamente" + (" y worker reiniciado." if bot_state.glory_started else ". Pulsa INICIAR GLORY para reanudar.")
+        except Exception as exc:
+            return f"UID {uid}: error al renovar: {html.escape(str(exc)[:180])}"
+
+    async def refresh_all_tokens(self) -> str:
+        eligible = []
+        seen = set()
+        for ad in list(bot_state.account_credentials.values()):
+            if not isinstance(ad, dict):
+                continue
+            uid = str(ad.get("account_id") or ad.get("auth_uid") or "").strip()
+            if uid and uid not in seen and ad.get("auth_uid") and ad.get("auth_password"):
+                eligible.append(uid); seen.add(uid)
+        if not eligible:
+            return "No hay cuentas con UID y contraseña guardados. Los tokens solos no se pueden renovar después de vencer."
+        ok = failed = 0
+        details = []
+        for uid in eligible:
+            result = await self.refresh_account_token(uid)
+            if "token renovado correctamente" in result:
+                ok += 1
+            else:
+                failed += 1
+            details.append(result)
+            await asyncio.sleep(0.8)
+        return f"Renovación terminada: {ok} correcta(s), {failed} fallida(s), de {len(eligible)} cuenta(s).\n\n" + "\n".join(details[:25])
 
     async def stats_text(self) -> str:
         accounts = list(bot_state.accounts.values())
@@ -268,6 +331,15 @@ class TelegramControl:
             return await self.wizard_threads(query, int(data.split(":", 2)[2]))
         if data == "wiz:run":
             return await self.wizard_run(query)
+        if data == "token:refresh:all":
+            await query.edit_message_text("🔄 Renovando las cuentas que tienen UID y contraseña guardados. Esto puede tardar...", parse_mode=ParseMode.HTML)
+            result = await self.refresh_all_tokens()
+            return await query.message.reply_text(result[:3900], reply_markup=self.panel())
+        if data.startswith("token:refresh:"):
+            uid = data.split(":", 2)[2]
+            await query.edit_message_text(f"🔄 Renovando credenciales de UID {html.escape(uid)}...")
+            result = await self.refresh_account_token(uid)
+            return await query.message.reply_text(result[:3900], reply_markup=self.panel())
         if data == "data:export":
             return await self.export_accounts(update)
         if data == "data:import":
@@ -327,6 +399,60 @@ class TelegramControl:
             json.dump(value, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
 
+    def _clan_points_config(self) -> dict:
+        data = self._read_data("clan_points.json", {"target": 4500, "accounts": {}})
+        if not isinstance(data, dict):
+            data = {"target": 4500, "accounts": {}}
+        data.setdefault("target", 4500)
+        data.setdefault("accounts", {})
+        return data
+
+    def _save_clan_points_config(self, data: dict) -> None:
+        self._write_data_atomic("clan_points.json", data)
+
+    async def command_clan_target(self, update, context):
+        if not await self.reject_or_continue(update): return
+        if not context.args or not context.args[0].isdigit():
+            cfg = self._clan_points_config()
+            await update.effective_message.reply_text(
+                f"Meta actual de puntos del clan: {int(cfg.get('target', 4500)):,}.\n"
+                "Para cambiarla: /meta_clan 4500")
+            return
+        target = int(context.args[0])
+        if not 1 <= target <= 10_000_000:
+            await update.effective_message.reply_text("La meta debe estar entre 1 y 10,000,000.")
+            return
+        cfg = self._clan_points_config(); cfg["target"] = target
+        self._save_clan_points_config(cfg)
+        await update.effective_message.reply_text(f"Meta individual guardada: {target:,} puntos de clan. La EXP/nivel sigue siendo independiente.")
+
+    async def command_clan_points(self, update, context):
+        if not await self.reject_or_continue(update): return
+        cfg = self._clan_points_config(); target = int(cfg.get("target", 4500))
+        if len(context.args) >= 2 and context.args[1].isdigit():
+            uid = str(context.args[0]).strip(); points = int(context.args[1])
+            if not uid.isdigit() or not 0 <= points <= 100_000_000:
+                await update.effective_message.reply_text("Uso: /puntos UID CANTIDAD (puntos acumulados de clan).")
+                return
+            cfg.setdefault("accounts", {})[uid] = points
+            self._save_clan_points_config(cfg)
+            if uid in bot_state.accounts:
+                bot_state.accounts[uid]["clan_points"] = points
+            remaining = max(0, target - points)
+            status = "Meta alcanzada" if points >= target else f"Faltan {remaining:,}"
+            await update.effective_message.reply_text(f"UID {uid}: {points:,}/{target:,} puntos de clan. {status}.\nEste registro no modifica la EXP ni desconecta la cuenta.")
+            return
+        if context.args:
+            await update.effective_message.reply_text("Uso: /puntos para ver el resumen o /puntos UID CANTIDAD para registrar puntos.")
+            return
+        rows = []
+        for uid, acc in sorted(bot_state.accounts.items()):
+            points = int(cfg.get("accounts", {}).get(uid, acc.get("clan_points", 0)) or 0)
+            rows.append(f"• {html.escape(str(acc.get('nickname') or uid))} ({uid}): {points:,}/{target:,}")
+        await update.effective_message.reply_text(
+            f"🏰 PUNTOS DEL CLAN — META {target:,}\n\n" + ("\n".join(rows) if rows else "No hay cuentas cargadas.") +
+            "\n\nEXP/nivel se controla por separado. Los puntos se registran manualmente.")
+
     async def export_accounts(self, update: Update):
         if not await self.reject_or_continue(update): return
         bundle = {
@@ -337,6 +463,7 @@ class TelegramControl:
             "devices": self._read_data("devices.json", {}),
             "guild_config": self._read_data("guild_config.json", bot_state.guild_config or {}),
             "banned_accounts": self._read_data("banned_accounts.json", {}),
+            "clan_points": self._clan_points_config(),
             # Estado visible para conservar nombres, niveles, EXP y orden de escuadra.
             "account_state": list(bot_state.accounts.values()),
         }
@@ -376,7 +503,19 @@ class TelegramControl:
                     row["token"] = str(row["token"]).strip(); incoming.append(row)
             if not incoming:
                 raise ValueError("El respaldo no contiene cuentas válidas")
+            points_cfg = self._clan_points_config()
+            for row in incoming:
+                uid = str(row.get("uid", ""))
+                if uid and "clan_points" in row:
+                    try: points_cfg.setdefault("accounts", {})[uid] = max(0, int(row.get("clan_points", 0)))
+                    except (TypeError, ValueError): pass
+            self._save_clan_points_config(points_cfg)
+            for row in incoming:
+                uid = str(row.get("uid", ""))
+                if uid and uid in bot_state.accounts:
+                    bot_state.accounts[uid]["clan_points"] = int(points_cfg.get("accounts", {}).get(uid, 0) or 0)
             current = self._read_data("accounts.json", [])
+            if not isinstance(current, list): current = []
             merged = []
             index = {}
             def key(row):
@@ -401,6 +540,23 @@ class TelegramControl:
                 self._write_data_atomic("guild_config.json", bot_state.guild_config)
             if isinstance(bundle.get("banned_accounts"), dict):
                 self._write_data_atomic("banned_accounts.json", bundle["banned_accounts"])
+            if isinstance(bundle.get("clan_points"), dict):
+                incoming_points = bundle["clan_points"]
+                points_cfg = self._clan_points_config()
+                if isinstance(incoming_points.get("target"), int) and incoming_points["target"] > 0:
+                    points_cfg["target"] = incoming_points["target"]
+                if isinstance(incoming_points.get("accounts"), dict):
+                    points_cfg.setdefault("accounts", {}).update({str(k): int(v) for k, v in incoming_points["accounts"].items() if str(v).lstrip("-").isdigit() and int(v) >= 0})
+                self._save_clan_points_config(points_cfg)
+                for uid, points in points_cfg.get("accounts", {}).items():
+                    if uid in bot_state.accounts:
+                        bot_state.accounts[uid]["clan_points"] = points
+            # Importar estado visible cuando se restaura un backup completo.
+            for state_row in bundle.get("account_state", []) if isinstance(bundle.get("account_state", []), list) else []:
+                if isinstance(state_row, dict) and state_row.get("uid"):
+                    state_uid = str(state_row["uid"])
+                    if state_uid in bot_state.accounts:
+                        bot_state.accounts[state_uid].update({k: v for k, v in state_row.items() if k in {"nickname", "region", "level", "current_exp", "gained_exp", "clan_points", "squad"}})
             # Si Glory está activo, reiniciar solo las cuentas importadas para que
             # tomen sus credenciales/cache y vuelvan a entrar en sus escuadras.
             restarted = 0
@@ -471,7 +627,7 @@ class TelegramControl:
         await update.effective_message.reply_text(f"Gremio guardado: {guild_id} ({region}).")
 
     async def help_command(self, update, context):
-        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /exportar /importar /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
+        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /exportar /importar /meta_clan PUNTOS /puntos [UID PUNTOS] /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
 
     async def notify(self, message: str, level: str = "info"):
         if not self.application or not _admin_ids(): return
@@ -501,6 +657,8 @@ class TelegramControl:
         self.application.add_handler(CommandHandler("generar", self.command_generate))
         self.application.add_handler(CommandHandler("exportar", self.export_accounts))
         self.application.add_handler(CommandHandler("importar", self.import_accounts))
+        self.application.add_handler(CommandHandler("meta_clan", self.command_clan_target))
+        self.application.add_handler(CommandHandler("puntos", self.command_clan_points))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.wizard_text))
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.import_accounts))
         self.application.add_handler(CommandHandler("gremio", self.command_guild))
