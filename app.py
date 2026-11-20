@@ -35,7 +35,7 @@ TOKEN_CACHE_TTL = 4500
 
 START_MATCH_INTERVAL    = 4.0
 NEW_MATCH_DELAY         = 6.0
-MAX_MATCH_DURATION      = 3000
+MAX_MATCH_DURATION      = 4000
 MATCH_IDLE_TIMEOUT      = 90.0
 EXP_REFRESH_INTERVAL    = 30.0
 EXP_REFRESH_AFTER_MATCH_DELAY = 9.0
@@ -579,8 +579,8 @@ def _banned_record(key):
     return r
 
 def _login_retry_delay(fails):
-    """15s, 30s, 60s ... max 15 min (login baar-baar fail ho to server ko spam na kare)."""
-    return min(900, 15 * (2 ** min(max(fails, 1) - 1, 6)))
+    """15s, 30s, 60s ... max 120s; evita dejar la cuenta congelada 480s."""
+    return min(120, 15 * (2 ** min(max(fails, 1) - 1, 6)))
 
 async def _team_member_join(uid):
     uid = str(uid)
@@ -2005,7 +2005,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
     region_index = 0
     current_search_region = REGION_ROTATION_LIST[0]
     _writer_ref = {"w": None}
-    _team_active = {"flag": True}
+    _team_active = {"flag": True, "retry": False}
 
     async def trigger_post_match_refresh():
         await asyncio.sleep(EXP_REFRESH_AFTER_MATCH_DELAY)
@@ -2143,6 +2143,10 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
             if final_cnt < target_size:
                 print_error(f"[TEAM] Only {final_cnt}/{target_size} joined — abort, retry")
                 _set_stage(f"ABORT: sirf {final_cnt}/{target_size} team mein aaye - start nahi hoga")
+                # El coordinador ya no puede formar la escuadra actual. Solicitar
+                # una reconexión controlada para volver a registrar e invitar a
+                # los miembros, en vez de quedar conectado sin iniciar partida.
+                _team_active["retry"] = True
                 heartbeat_stop.set()
                 try: hb_task.cancel(); await hb_task
                 except (asyncio.CancelledError, Exception): pass
@@ -2309,6 +2313,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                 current_search_region = str(account_region or "IND").upper()
 
                 print_success(f"[FUNC] TCP connected {uid_str} (DNS:{rip} Lvl:{current_level} R:{current_search_region})")
+                _team_active["retry"] = False
                 reconnects = 0; no_response_count = 0; last_start_time = 0.0
 
                 _sync_squad(current_account_data, uid_str)
@@ -2328,6 +2333,8 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                     await start_game_battle_royale(current_search_region, client_version, writer, current_key, current_iv)
 
                 while True:
+                    if TEAM_MODE and _team_active.get("retry"):
+                        raise ConnectionError("Squad incomplete; reconnecting for retry")
                     play_matches[:] = [m for m in play_matches if not m.done()]
                     _sk = _worker_key(current_account_data)
                     if _sk and _sk in _squad_dirty:          # rebalance ne is account ko dusri squad di -> turant naye squad se connect
@@ -2663,6 +2670,11 @@ async def refresh_account_profile(ad_or_uid):
 async def process_account_uid_pass(uid, password):
     cached = cache_get(uid)
     if cached:
+        # Cachés antiguas podían no conservar las credenciales de origen.
+        # Completar estos campos permite reconstruir el token al caducar.
+        cached.setdefault('auth_type', 'guest')
+        cached['auth_uid'] = str(uid)
+        cached['auth_password'] = str(password)
         print_success(f"[CACHE] {uid} loaded")
         acc_id = str(cached['account_id'])
         bot_state.register_account(uid=acc_id,
@@ -2674,20 +2686,30 @@ async def process_account_uid_pass(uid, password):
     print_info(f"[LOGIN] UID {uid}...")
     try:
         vc = await version_config()
-        if not vc: return None
+        if not vc:
+            print_error(f"[LOGIN] UID {uid}: no se pudo obtener version_config")
+            return None
         rel, cv, su = vc
         tg = await get_access_token(uid, password)
-        if not tg: return None
+        if not tg:
+            print_error(f"[LOGIN] UID {uid}: get_access_token devolvió vacío")
+            return None
         oid, at, pf = tg
         dev = get_device_for_account(uid)
         lpd = await build_majorlogin_payload(oid, at, pf, cv, dev)
-        if not lpd: return None
+        if not lpd:
+            print_error(f"[LOGIN] UID {uid}: no se pudo construir MajorLogin")
+            return None
         mresp = await send_majorlogin(lpd, rel, su)
         if isinstance(mresp, _BanResult):
             _mark_banned(uid, mresp.info); raise AccountBanned(mresp.info)
-        if mresp is None: return None
+        if mresp is None:
+            print_error(f"[LOGIN] UID {uid}: MajorLogin no devolvió credenciales")
+            return None
         gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
-        if gl is None: return None
+        if gl is None:
+            print_error(f"[LOGIN] UID {uid}: GetLoginData falló")
+            return None
         rp, dd = gl
         acc_id = str(mresp.account_id)
         level = int(get_proto_field(dd, 6, 1) or 1)
@@ -2721,6 +2743,9 @@ async def process_account_token(access_token):
     cache_key = f"tok_{access_token[:20]}"
     cached = cache_get(cache_key)
     if cached:
+        # Completar metadatos de token_cache.json de versiones antiguas.
+        cached.setdefault('auth_type', 'token')
+        cached['auth_token'] = access_token
         acc_id = str(cached['account_id'])
         bot_state.register_account(uid=acc_id,
             nickname=cached.get('nickname', f"Player_{acc_id}"),
@@ -2731,25 +2756,37 @@ async def process_account_token(access_token):
     print_info("[LOGIN] Token...")
     try:
         vc = await version_config()
-        if not vc: return None
+        if not vc:
+            print_error("[LOGIN] Token: no se pudo obtener version_config")
+            return None
         rel, cv, su = vc
         import requests
         url = f"https://100067.connect.garena.com/oauth/token/inspect?token={access_token}"
         hdrs = {"User-Agent": "GarenaMSDK/4.0.19P4(G011A ;Android 9;en;US;)"}
         resp = await asyncio.to_thread(requests.get, url, headers=hdrs, timeout=10)
         d = resp.json()
-        if 'error' in d: return None
+        if 'error' in d:
+            print_error(f"[LOGIN] Token inspect rechazado: {d.get('error')}")
+            return None
         oid = d.get('open_id'); pf = d.get('platform', 4)
-        if not oid: return None
+        if not oid:
+            print_error("[LOGIN] Token inspect no devolvió open_id")
+            return None
         dev = get_device_for_account(oid)
         lpd = await build_majorlogin_payload(oid, access_token, str(pf), cv, dev)
-        if not lpd: return None
+        if not lpd:
+            print_error("[LOGIN] Token: no se pudo construir MajorLogin")
+            return None
         mresp = await send_majorlogin(lpd, rel, su)
         if isinstance(mresp, _BanResult):
             _mark_banned(cache_key, mresp.info); raise AccountBanned(mresp.info)
-        if mresp is None: return None
+        if mresp is None:
+            print_error("[LOGIN] Token: MajorLogin no devolvió credenciales")
+            return None
         gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
-        if gl is None: return None
+        if gl is None:
+            print_error("[LOGIN] Token: GetLoginData falló")
+            return None
         rp, dd = gl
         acc_id = str(mresp.account_id)
         level = int(get_proto_field(dd, 6, 1) or 1)
@@ -2790,14 +2827,18 @@ async def relogin_account(uid_str, account_data):
     try: bot_state.update_status(uid_str, "RE-LOGIN")
     except Exception: pass
     print_warning(f"[RELOGIN] {uid_str}: naya token le raha hoon (match se pehle)...")
-    for attempt in range(1, 4):
+    for attempt in range(1, 6):
         try:
-            if account_data.get('auth_type') == 'guest' and account_data.get('auth_uid') and account_data.get('auth_password'):
-                cache_invalidate(str(account_data['auth_uid']))
-                new_cred = await process_account_uid_pass(str(account_data['auth_uid']), account_data['auth_password'])
-            elif account_data.get('auth_type') == 'token' and account_data.get('auth_token'):
-                cache_invalidate(f"tok_{account_data['auth_token'][:20]}")
-                new_cred = await process_account_token(account_data['auth_token'])
+            auth_uid = account_data.get('auth_uid')
+            auth_password = account_data.get('auth_password')
+            auth_token = account_data.get('auth_token')
+            auth_type = account_data.get('auth_type')
+            if (auth_type == 'guest' and auth_uid and auth_password) or (not auth_type and auth_uid and auth_password):
+                cache_invalidate(str(auth_uid))
+                new_cred = await process_account_uid_pass(str(auth_uid), auth_password)
+            elif (auth_type == 'token' and auth_token) or (not auth_type and auth_token):
+                cache_invalidate(f"tok_{auth_token[:20]}")
+                new_cred = await process_account_token(auth_token)
             else:
                 print_error(f"[RELOGIN] {uid_str}: auth info missing")
                 _ev("fail", "auth info missing"); return None
@@ -2816,10 +2857,10 @@ async def relogin_account(uid_str, account_data):
             return None
         except Exception as e:
             print_error(f"[RELOGIN] {uid_str} try {attempt}: {e}")
-        await asyncio.sleep(3)
+        await asyncio.sleep(min(30, 3 * (2 ** (attempt - 1))))
     try: bot_state.update_status(uid_str, "ERROR")
     except Exception: pass
-    _ev("fail", "3 koshish ke baad bhi login fail")
+    _ev("fail", "5 koshish ke baad bhi login fail")
     return None
 
 bot_state.relogin_account = relogin_account

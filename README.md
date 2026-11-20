@@ -52,3 +52,9 @@ Se verificó la compilación sintáctica con `python3 -m compileall`. No se afir
 ## Generar cuentas, unir al clan y jugar
 
 El botón **GENERAR + CLAN + JUGAR** muestra el formato del comando. Ejemplo: `/generar 4 2 2068400598 NA`. El flujo reutiliza `gen.py` y `dashboard_server._run_automation`: genera las cuentas, consulta la información del clan, envía las solicitudes de unión y finalmente llama al callback original `on_glory_start`. El botón **PROGRESO** muestra la etapa, cuentas creadas, unidas y fallidas.
+
+## Exportar e importar cuentas desde Telegram
+
+En el panel usa **📤 EXPORTAR CUENTAS** para recibir un respaldo JSON privado. También puedes usar `/exportar`. El archivo incluye las cuentas persistentes, caché de tokens, dispositivos, configuración del clan, cuentas bloqueadas y estado visible. Los tokens y contraseñas son secretos: no compartas el archivo ni lo subas a GitHub.
+
+Para restaurar, pulsa **📥 IMPORTAR CUENTAS**, adjunta el JSON exportado o usa `/importar` y después adjunta el archivo. La importación fusiona por UID/token, no borra las cuentas existentes y conserva el orden del respaldo. Si Glory está activo, las cuentas importadas se reinician con el motor original y vuelven a organizarse en escuadras automáticamente.

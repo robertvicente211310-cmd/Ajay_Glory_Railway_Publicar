@@ -11,3 +11,5 @@ banned_accounts.json
 generator.log
 *.log
 *.tmp
+
+ajay_glory_backup_*.json

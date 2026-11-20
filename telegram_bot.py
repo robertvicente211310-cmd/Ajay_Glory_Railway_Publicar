@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import time
+import io
 from typing import Awaitable, Callable, Optional
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, InputFile, ForceReply
 from telegram.constants import ParseMode
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
-                          ContextTypes)
+                          ContextTypes, MessageHandler, filters)
 
-from dashboard_server import bot_state, _run_automation
+from dashboard_server import bot_state, _run_automation, REGION_SERVER_MAP, _canonical_guild_region
 
 
 def _admin_ids() -> set[int]:
@@ -37,6 +39,7 @@ class TelegramControl:
         self.last_notice: dict[str, float] = {}
         self._page_size = 8
         self.pending_deletes: set[tuple[int, str]] = set()
+        self.wizards: dict[int, dict] = {}
 
     async def reject_or_continue(self, update: Update) -> bool:
         if _authorized(update):
@@ -50,8 +53,10 @@ class TelegramControl:
         rows = [
             [InlineKeyboardButton("▶️ INICIAR GLORY", callback_data="glory:start"), InlineKeyboardButton("⏹ DETENER GLORY", callback_data="glory:stop")],
             [InlineKeyboardButton("📊 ESTADÍSTICAS", callback_data="view:stats"), InlineKeyboardButton("👥 CUENTAS", callback_data="view:accounts:0")],
-            [InlineKeyboardButton("🏆 EXPERIENCIA EXP", callback_data="view:exp"), InlineKeyboardButton("🏰 CONFIGURACIÓN DEL GREMIO", callback_data="view:guild")],
-            [InlineKeyboardButton("🚀 GENERAR + CLAN + JUGAR", callback_data="automation:help"), InlineKeyboardButton("🔄 PROGRESO", callback_data="view:automation")],
+            [InlineKeyboardButton("👁️ CUENTAS JUGANDO", callback_data="view:playing"), InlineKeyboardButton("🏆 EXP POR CUENTA", callback_data="view:exp")],
+            [InlineKeyboardButton("🏰 CONFIGURACIÓN DEL GREMIO", callback_data="view:guild"), InlineKeyboardButton("🤝 AMISTADES AUTO", callback_data="view:friends")],
+            [InlineKeyboardButton("🚀 GENERAR + CLAN + JUGAR", callback_data="wizard:start"), InlineKeyboardButton("🔄 PROGRESO", callback_data="view:automation")],
+            [InlineKeyboardButton("📤 EXPORTAR CUENTAS", callback_data="data:export"), InlineKeyboardButton("📥 IMPORTAR CUENTAS", callback_data="data:import")],
             [InlineKeyboardButton("📋 REGISTRO DE ACTIVIDAD", callback_data="view:logs"), InlineKeyboardButton("🔄 ACTUALIZAR", callback_data="panel")],
             [InlineKeyboardButton("⚙️ CONFIGURACIÓN", callback_data="view:config")],
         ]
@@ -123,11 +128,12 @@ class TelegramControl:
 
     def safe_account(self, acc: dict) -> str:
         uid = str(acc.get("uid", "?"))
-        nick = acc.get("nickname") or "sin nombre"
-        status = acc.get("status", "?")
-        level = acc.get("level", "?")
-        exp = acc.get("current_exp", acc.get("exp", 0))
-        return f"• <b>{nick}</b> — UID {uid}\n  Estado: {status} | Nivel: {level} | EXP: {exp:,}"
+        nick = html.escape(str(acc.get("nickname") or "sin nombre"))
+        status = html.escape(str(acc.get("status", "?")))
+        level = html.escape(str(acc.get("level", "?")))
+        exp = int(acc.get("current_exp", acc.get("exp", 0)) or 0)
+        gained = int(acc.get("gained_exp", 0) or 0)
+        return f"• <b>{nick}</b> — UID {html.escape(uid)}\n  Estado: {status} | Nivel: {level} | EXP: {exp:,} (+{gained:,})"
 
     async def accounts_text(self, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
         accounts = sorted(bot_state.accounts.values(), key=lambda a: str(a.get("uid", "")))
@@ -154,6 +160,59 @@ class TelegramControl:
                 f"Partidas realizadas: {bot_state.total_matches}\nPartidas activas: {active}\n"
                 f"EXP obtenida: {bot_state.total_gained_exp:,}\nTiempo activo: {uptime//3600}h {(uptime%3600)//60}m")
 
+    def region_keyboard(self):
+        flags = {"IND": "🇮🇳", "ME": "🌍", "VN": "🇻🇳", "BD": "🇧🇩", "PK": "🇵🇰", "SG": "🇸🇬", "BR": "🇧🇷", "NA": "🇺🇸", "ID": "🇮🇩", "RU": "🇷🇺", "TH": "🇹🇭", "SAC": "🌎", "TW": "🇹🇼", "CIS": "🌐"}
+        regions = [(flags.get(code, "🌐"), code) for code in REGION_SERVER_MAP]
+        return InlineKeyboardMarkup([[InlineKeyboardButton(f"{flag} {code}", callback_data=f"wiz:region:{code}") for flag, code in regions[i:i+2]] for i in range(0, len(regions), 2)])
+
+    def count_keyboard(self):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(str(n), callback_data=f"wiz:count:{n}") for n in (1, 2, 4, 8)], [InlineKeyboardButton("16", callback_data="wiz:count:16"), InlineKeyboardButton("32", callback_data="wiz:count:32")], [InlineKeyboardButton("⬅️ Cancelar", callback_data="panel")]])
+
+    def thread_keyboard(self):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(f"🧵 {n} hilo(s)", callback_data=f"wiz:threads:{n}") for n in (1, 2, 3)], [InlineKeyboardButton("🧵 5 hilos (recomendado)", callback_data="wiz:threads:5")], [InlineKeyboardButton("⬅️ Cancelar", callback_data="panel")]])
+
+    async def wizard_start(self, update: Update):
+        uid = update.effective_user.id
+        self.wizards[uid] = {"step": "guild"}
+        await update.callback_query.edit_message_text("🚀 <b>CREAR CUENTAS + CLAN + JUGAR</b>\n\nPulsa el botón para introducir el ID del clan.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏰 PONER ID DEL CLAN", callback_data="wiz:askguild")], [InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
+
+    async def wizard_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await self.reject_or_continue(update): return
+        uid = update.effective_user.id; state = self.wizards.get(uid)
+        if not state or state.get("step") != "guild": return
+        value = (update.effective_message.text or "").strip()
+        if not value.isdigit():
+            await update.effective_message.reply_text("El ID del clan debe contener solo números.", reply_markup=ForceReply(selective=True)); return
+        state.update({"guild_id": value, "step": "region"})
+        await update.effective_message.reply_text("🌍 Selecciona la región del clan:", reply_markup=self.region_keyboard())
+
+    async def wizard_region(self, query, region: str):
+        state = self.wizards.setdefault(query.from_user.id, {})
+        state.update({"region": region, "step": "count"})
+        await query.edit_message_text(f"Región seleccionada: {region}\n\n¿Cuántas cuentas deseas crear?", reply_markup=self.count_keyboard())
+
+    async def wizard_count(self, query, count: int):
+        state = self.wizards.setdefault(query.from_user.id, {})
+        state.update({"total": count, "step": "threads"})
+        await query.edit_message_text(f"Cuentas a crear: {count}\n\nSelecciona los hilos de generación:", reply_markup=self.thread_keyboard())
+
+    async def wizard_threads(self, query, threads: int):
+        state = self.wizards.setdefault(query.from_user.id, {})
+        state.update({"threads": threads, "step": "confirm"})
+        region = _canonical_guild_region(str(state.get("guild_id")), str(state.get("region", "IND")))
+        state["region"] = region
+        await query.edit_message_text(f"✅ <b>CONFIRMAR</b>\n\nClan: {html.escape(str(state.get('guild_id')))}\nRegión: {html.escape(region)}\nCuentas: {state.get('total')}\nHilos: {threads}\n\nEl flujo generará, enviará al clan y arrancará Glory.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🚀 INICIAR", callback_data="wiz:run"), InlineKeyboardButton("❌ Cancelar", callback_data="panel")]]))
+
+    async def wizard_run(self, query):
+        state = self.wizards.get(query.from_user.id, {})
+        if bot_state.automation.get("running"):
+            await query.edit_message_text("Ya hay una automatización en curso.", reply_markup=self.panel()); return
+        if not state.get("guild_id") or not state.get("region"):
+            await query.edit_message_text("Falta configurar el clan.", reply_markup=self.panel()); return
+        bot_state.automation_task = asyncio.create_task(_run_automation(state["guild_id"], state["region"], int(state.get("total", 1)), int(state.get("threads", 1)), True))
+        self.wizards.pop(query.from_user.id, None)
+        await query.edit_message_text("🚀 Proceso iniciado. Usa PROGRESO para ver generación, unión al clan y arranque de Glory.", reply_markup=self.panel())
+
     async def render_view(self, query, kind: str, page: int = 0):
         if kind == "stats":
             text, markup = await self.stats_text(), InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
@@ -174,6 +233,14 @@ class TelegramControl:
             a = bot_state.automation
             text = ("🚀 <b>AUTOMATIZACIÓN</b>\n\n" f"Estado: {a.get('stage','idle')}\n" f"Mensaje: {a.get('message','')}\n" f"Generadas: {a.get('created',0)}/{a.get('target',0)}\n" f"Unidas al clan: {a.get('joined',0)}\n" f"Fallidas: {a.get('failed',0)}")
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Actualizar", callback_data="view:automation"), InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
+        elif kind == "playing":
+            playing = [a for a in bot_state.accounts.values() if int(a.get('active_matches', 0) or 0) > 0 or str(a.get('status', '')).upper().startswith('IN_MATCH') or a.get('spectating')]
+            lines = [f"🎮 {html.escape(str(a.get('nickname','sin nombre')))} — UID {html.escape(str(a.get('uid','?')))} | {'👁️ ESPECTANDO' if a.get('spectating') else '🟢 EN PARTIDA'} | Escuadra {html.escape(str(a.get('squad','?')))}" for a in playing]
+            text = "👁️ <b>CUENTAS JUGANDO</b>\n\n" + ("\n".join(lines) if lines else "Ninguna cuenta está reportada en partida ahora.")
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔄 Actualizar", callback_data="view:playing"), InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
+        elif kind == "friends":
+            text = "🤝 <b>AMISTADES AUTOMÁTICAS</b>\n\nEl motor tiene habilitada la aceptación automática de solicitudes mediante ConfirmFriendRequest. Las cuentas aceptan solicitudes mientras están conectadas; revisa REGISTRO DE ACTIVIDAD para ver confirmaciones."
+            markup = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Ver registro", callback_data="view:logs"), InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
         else:
             text = "⚙️ <b>CONFIGURACIÓN</b>\n\nVariables: TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_IDS, DATA_DIR.\nUsa /id para consultar tu ID."
             markup = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
@@ -187,6 +254,24 @@ class TelegramControl:
         data = query.data or ""
         if data == "panel": return await self.send_panel(update, edit=True)
         if data == "glory:start": return await query.edit_message_text(await self.start_glory(update), reply_markup=self.panel())
+        if data == "wizard:start":
+            return await self.wizard_start(update)
+        if data == "wiz:askguild":
+            self.wizards[query.from_user.id] = {"step": "guild"}
+            await query.edit_message_text("Escribe ahora el ID numérico del clan:")
+            return await query.message.reply_text("ID del clan:", reply_markup=ForceReply(selective=True))
+        if data.startswith("wiz:region:"):
+            return await self.wizard_region(query, data.split(":", 2)[2])
+        if data.startswith("wiz:count:"):
+            return await self.wizard_count(query, int(data.split(":", 2)[2]))
+        if data.startswith("wiz:threads:"):
+            return await self.wizard_threads(query, int(data.split(":", 2)[2]))
+        if data == "wiz:run":
+            return await self.wizard_run(query)
+        if data == "data:export":
+            return await self.export_accounts(update)
+        if data == "data:import":
+            return await query.edit_message_text("📥 <b>IMPORTAR CUENTAS</b>\n\nAdjunta aquí el archivo JSON descargado con EXPORTAR CUENTAS. La importación fusionará los datos y reiniciará las cuentas si Glory está activo.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
         if data == "automation:help":
             return await query.edit_message_text("🚀 <b>GENERAR + CLAN + JUGAR</b>\n\nUsa el comando:\n<code>/generar CANTIDAD HILOS ID_CLAN REGION</code>\n\nEjemplo: <code>/generar 4 2 2068400598 NA</code>\n\nEl flujo usa el generador original, consulta el clan, envía las cuentas al clan y arranca los workers de Glory.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
         if data.startswith("delete:yes:"):
@@ -225,6 +310,114 @@ class TelegramControl:
             return
         bot_state.automation_task = asyncio.create_task(_run_automation(guild_id, region, total, threads, True))
         await update.effective_message.reply_text(f"Automatización iniciada: generar {total} cuenta(s), enviar al clan {guild_id} ({region}) y comenzar Glory. Usa PROGRESO para consultar.")
+
+    def _data_path(self, name: str) -> str:
+        return os.path.join(os.getenv("DATA_DIR", "."), name)
+
+    def _read_data(self, name: str, default):
+        try:
+            with open(self._data_path(name), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+
+    def _write_data_atomic(self, name: str, value):
+        path = self._data_path(name); tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(value, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+
+    async def export_accounts(self, update: Update):
+        if not await self.reject_or_continue(update): return
+        bundle = {
+            "format": "ajay-glory-backup-v1",
+            "created_at": int(time.time()),
+            "accounts": self._read_data("accounts.json", []),
+            "token_cache": self._read_data("token_cache.json", {}),
+            "devices": self._read_data("devices.json", {}),
+            "guild_config": self._read_data("guild_config.json", bot_state.guild_config or {}),
+            "banned_accounts": self._read_data("banned_accounts.json", {}),
+            # Estado visible para conservar nombres, niveles, EXP y orden de escuadra.
+            "account_state": list(bot_state.accounts.values()),
+        }
+        payload = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
+        name = f"ajay_glory_backup_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        await update.effective_message.reply_document(
+            document=InputFile(io.BytesIO(payload), filename=name),
+            caption="Respaldo completo de Ajay Glory. Contiene credenciales y tokens: guárdalo de forma privada."
+        )
+
+    async def import_accounts(self, update: Update):
+        if not await self.reject_or_continue(update): return
+        document = update.effective_message.document
+        if not document:
+            await update.effective_message.reply_text("Adjunta el JSON exportado por el botón EXPORTAR CUENTAS.")
+            return
+        if document.file_size and document.file_size > 15 * 1024 * 1024:
+            await update.effective_message.reply_text("El archivo supera el límite de 15 MB.")
+            return
+        try:
+            remote = await document.get_file()
+            raw = bytes(await remote.download_as_bytearray())
+            data = json.loads(raw.decode("utf-8"))
+            if isinstance(data, list):
+                bundle = {"accounts": data}
+            elif isinstance(data, dict) and isinstance(data.get("accounts"), list):
+                bundle = data
+            else:
+                raise ValueError("Formato de respaldo no reconocido")
+            incoming = []
+            for row in bundle.get("accounts", []):
+                if not isinstance(row, dict): continue
+                row = dict(row)
+                if row.get("uid") and row.get("password"):
+                    row["uid"] = str(row["uid"]).strip(); incoming.append(row)
+                elif row.get("token"):
+                    row["token"] = str(row["token"]).strip(); incoming.append(row)
+            if not incoming:
+                raise ValueError("El respaldo no contiene cuentas válidas")
+            current = self._read_data("accounts.json", [])
+            merged = []
+            index = {}
+            def key(row):
+                return "uid:" + str(row.get("uid")) if row.get("uid") else "token:" + str(row.get("token"))
+            for row in current:
+                if isinstance(row, dict): index[key(row)] = len(merged); merged.append(row)
+            updated = 0; added = 0
+            for row in incoming:
+                k = key(row)
+                if k in index:
+                    merged[index[k]].update(row); updated += 1
+                else:
+                    index[k] = len(merged); merged.append(row); added += 1
+            self._write_data_atomic("accounts.json", merged)
+            for name in ("token_cache", "devices"):
+                if isinstance(bundle.get(name), dict):
+                    existing = self._read_data(name + ".json", {})
+                    if not isinstance(existing, dict): existing = {}
+                    existing.update(bundle[name]); self._write_data_atomic(name + ".json", existing)
+            if isinstance(bundle.get("guild_config"), dict) and bundle["guild_config"].get("guild_id"):
+                bot_state.guild_config = bundle["guild_config"]
+                self._write_data_atomic("guild_config.json", bot_state.guild_config)
+            if isinstance(bundle.get("banned_accounts"), dict):
+                self._write_data_atomic("banned_accounts.json", bundle["banned_accounts"])
+            # Si Glory está activo, reiniciar solo las cuentas importadas para que
+            # tomen sus credenciales/cache y vuelvan a entrar en sus escuadras.
+            restarted = 0
+            if bot_state.glory_started:
+                for row in incoming:
+                    cancelled = []
+                    for worker_key, worker in list(bot_state.account_workers.items()):
+                        if (row.get("uid") and str(worker_key) == str(row["uid"])) or (row.get("token") and str(worker_key).startswith(str(row["token"])[:10])):
+                            worker.cancel(); cancelled.append(worker); bot_state.account_workers.pop(worker_key, None)
+                    if cancelled:
+                        await asyncio.gather(*cancelled, return_exceptions=True)
+                    cb = bot_state.refresh_callbacks.get("on_account_added")
+                    if cb:
+                        await cb(row); restarted += 1
+            await update.effective_message.reply_text(f"Importación completada. Nuevas: {added}, actualizadas: {updated}, workers reiniciados: {restarted}. El orden importado se conserva para reconstruir las escuadras.")
+        except Exception as exc:
+            await update.effective_message.reply_text(f"No se pudo importar el respaldo: {exc}")
 
     async def command_delete(self, update, context):
         if not await self.reject_or_continue(update): return
@@ -278,7 +471,7 @@ class TelegramControl:
         await update.effective_message.reply_text(f"Gremio guardado: {guild_id} ({region}).")
 
     async def help_command(self, update, context):
-        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
+        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /exportar /importar /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
 
     async def notify(self, message: str, level: str = "info"):
         if not self.application or not _admin_ids(): return
@@ -306,6 +499,10 @@ class TelegramControl:
         self.application.add_handler(CommandHandler("logs", self.command_logs))
         self.application.add_handler(CommandHandler("eliminar", self.command_delete))
         self.application.add_handler(CommandHandler("generar", self.command_generate))
+        self.application.add_handler(CommandHandler("exportar", self.export_accounts))
+        self.application.add_handler(CommandHandler("importar", self.import_accounts))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.wizard_text))
+        self.application.add_handler(MessageHandler(filters.Document.ALL, self.import_accounts))
         self.application.add_handler(CommandHandler("gremio", self.command_guild))
         self.application.add_handler(CommandHandler("ayuda", self.help_command))
         self.application.add_handler(CallbackQueryHandler(self.callback))
