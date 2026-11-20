@@ -3051,17 +3051,43 @@ async def main():
         bot_state.refresh_callbacks["on_account_added"] = on_account_added
         bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account
         bot_state.refresh_callbacks["on_glory_start"] = start_all_glory_workers
-    except Exception: pass
+    except Exception:
+        pass
+
+    # INICIAR TELEGRAM
+    telegram_control = create_telegram_control()
+    telegram_started = False
 
     try:
-        while True: await asyncio.sleep(1)
+        telegram_started = await telegram_control.start()
+
+        if telegram_started:
+            print_success("[TELEGRAM] Bot conectado y escuchando comandos.")
+        else:
+            print_warning("[TELEGRAM] Falta TELEGRAM_BOT_TOKEN.")
+
+    except Exception as e:
+        print_error(f"[TELEGRAM] Error al iniciar: {e}")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+
     except (KeyboardInterrupt, asyncio.CancelledError):
         print_warning("Shutting down...")
-        for t in list(bot_state.account_workers.values()): t.cancel()
-        await asyncio.gather(*bot_state.account_workers.values(), return_exceptions=True)
+        for t in list(bot_state.account_workers.values()):
+            t.cancel()
+
+        await asyncio.gather(
+            *bot_state.account_workers.values(),
+            return_exceptions=True
+        )
+
         if telegram_started:
             await telegram_control.stop()
+
         print_success("Closed.")
+
 
 if __name__ == "__main__":
     try:
