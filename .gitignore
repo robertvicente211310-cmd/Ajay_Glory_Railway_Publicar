@@ -1,14 +1,13 @@
-# Datos privados y estado local
+__pycache__/
+*.pyc
+.env
 accounts.json
-accounts_archive.json
 token_cache.json
 devices.json
-banned_accounts.json
+accounts_archive.json
 guild_config.json
 guild_exp_cache.json
+banned_accounts.json
+generator.log
 *.log
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.env
+*.tmp

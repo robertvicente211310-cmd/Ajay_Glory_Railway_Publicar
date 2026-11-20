@@ -7,3 +7,4 @@ pycryptodome
 PyJWT
 requests
 urllib3
+python-telegram-bot>=21.0,<22.0

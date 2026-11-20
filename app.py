@@ -21,13 +21,16 @@ import RbcFF_pb2
 import thunderFF_pb2
 
 from dashboard_server import bot_state, start_web_dashboard
+from telegram_bot import create_telegram_control
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
 WEB_HOST = "0.0.0.0"
 WEB_PORT = int(os.environ.get("PORT", os.environ.get("WEB_PORT", "7777")))
-ACCOUNTS_FILE = "accounts.json"
-TOKEN_CACHE_FILE = "token_cache.json"
-DEVICES_FILE = "devices.json"
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", "."))
+os.makedirs(DATA_DIR, exist_ok=True)
+ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
+TOKEN_CACHE_FILE = os.path.join(DATA_DIR, "token_cache.json")
+DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 TOKEN_CACHE_TTL = 4500
 
 START_MATCH_INTERVAL    = 4.0
@@ -484,7 +487,7 @@ class _BanResult:
     banned = True
     def __init__(self, info): self.info = info
 
-BANNED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banned_accounts.json")
+BANNED_FILE = os.path.join(DATA_DIR, "banned_accounts.json")
 _BAN_REASONS = {0: "UNKNOWN", 1: "IN_GAME_AUTO", 2: "REFUND", 3: "OTHERS", 4: "SKINMOD", 1014: "IN_GAME_AUTO_NEW"}
 
 def _pb_fields(buf):
@@ -3056,6 +3059,8 @@ async def main():
         print_warning("Shutting down...")
         for t in list(bot_state.account_workers.values()): t.cancel()
         await asyncio.gather(*bot_state.account_workers.values(), return_exceptions=True)
+        if telegram_started:
+            await telegram_control.stop()
         print_success("Closed.")
 
 if __name__ == "__main__":

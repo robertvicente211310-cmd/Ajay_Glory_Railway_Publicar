@@ -26,12 +26,17 @@ from google.protobuf.json_format import MessageToDict
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", "."))
+os.makedirs(DATA_DIR, exist_ok=True)
 TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
+ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
+TOKEN_CACHE_FILE = os.path.join(DATA_DIR, "token_cache.json")
+DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 
 # External guild APIs supplied for the dashboard setup flow.
 GUILD_JOIN_API = "https://danger-guild-management-web.vercel.app/join"
 GUILD_INFO_API = "https://danger-guild-management-web.vercel.app/guild"
-GUILD_CONFIG_FILE = "guild_config.json"
+GUILD_CONFIG_FILE = os.path.join(DATA_DIR, "guild_config.json")
 # El clan indicado por el usuario pertenece a NA; evita que el servicio use otra región por defecto.
 FIXED_GUILD_REGIONS = {"2068400598": "NA"}
 
@@ -200,11 +205,11 @@ async def handle_index(request: web.Request) -> web.Response:
     return web.Response(text=content, content_type="text/html", charset="utf-8")
 
 
-BANNED_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banned_accounts.json")
+BANNED_FILE = os.path.join(DATA_DIR, "banned_accounts.json")
 
 # ---- Purane accounts: accounts.json har baar "fresh pool" mein khaali ho jata hai, isliye purane accounts ka
 # ---- automatic archive (accounts_archive.json) rakhte hain. Dashboard se jab chaho unhe wapas activate kar sakte ho.
-ARCHIVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts_archive.json")
+ARCHIVE_FILE = os.path.join(DATA_DIR, "accounts_archive.json")
 
 def _read_json_list(path):
     try:
@@ -223,7 +228,7 @@ def _write_json_atomic(path, data):
 def _archive_accounts():
     """accounts.json ke saare (uid+password) accounts ko archive mein jod deta hai (duplicate nahi)."""
     try:
-        cur = _read_json_list("accounts.json")
+        cur = _read_json_list(ACCOUNTS_FILE)
         arc = _read_json_list(ARCHIVE_FILE)
         have = {str(a.get("uid", "")) for a in arc}
         added = 0
@@ -270,7 +275,7 @@ async def handle_activate_old(request: web.Request) -> web.Response:
         targets = [u for u in pool if u in arc and u not in running and u not in banned]
         if not targets:
             return web.json_response({"status": "ok", "activated": 0, "message": "Koi purana account activate karne layak nahi (sab chal rahe hain ya banned hain)"})
-        existing = _read_json_list("accounts.json")
+        existing = _read_json_list(ACCOUNTS_FILE)
         have = {str(a.get("uid", "")) for a in existing}
         for u in targets:
             if u not in have:
@@ -391,6 +396,7 @@ class BotState:
         self.guild_live: Dict[str, Any] = {}                  # live guild glory / gain / members (dashboard panel)
         self.banned_accounts: Dict[str, Dict[str, Any]] = {}  # banned accounts (login retry band) - dashboard panel
         self.squad_info: Dict[str, Dict[str, Any]] = {}       # squad-wise registered/playing/waiting (dashboard sections)
+        self.notify_callback = None
 
     def register_writer(self, uid: str, writer):
         uid_str = str(uid)
@@ -441,6 +447,14 @@ class BotState:
         self.logs.append(entry)
         if len(self.logs) > self.max_logs:
             self.logs.pop(0)
+        # Telegram recibe solo eventos relevantes y el módulo aplica deduplicación.
+        msg_lower = str(message).lower()
+        important = level in {"error", "warning"} or any(word in msg_lower for word in ("reconnect", "re-login", "disconnect", "started", "stopped", "iniciado", "detenido"))
+        if important and self.notify_callback:
+            try:
+                asyncio.create_task(self.notify_callback(str(message), level))
+            except Exception:
+                pass
 
     def register_account(self, uid: str, nickname: str, region: str, level: int, exp: int,
                          likes: int = 0, token: Optional[str] = None, auth_uid: Optional[str] = None):
@@ -733,7 +747,7 @@ async def handle_index(request: web.Request) -> web.Response:
 
 # ==================== GUILD SETUP / JOIN API ENDPOINTS ====================
 async def _load_accounts_for_join():
-    accounts_file = "accounts.json"
+    accounts_file = ACCOUNTS_FILE
     try:
         with open(accounts_file, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -918,7 +932,7 @@ async def handle_api_guild_config(request: web.Request) -> web.Response:
 
 
 # ==================== GUILD INFO API ENDPOINT (AIOHTTP) ====================
-GUILD_CACHE_FILE = "guild_exp_cache.json"
+GUILD_CACHE_FILE = os.path.join(DATA_DIR, "guild_exp_cache.json")
 
 def load_guild_cache():
     if os.path.exists(GUILD_CACHE_FILE):
@@ -975,7 +989,7 @@ async def handle_api_guild_info(request: web.Request) -> web.Response:
 async def handle_export_accounts(request: web.Request) -> web.Response:
     """Descarga una copia de las cuentas guardadas, incluyendo nombre, contraseña y región."""
     try:
-        accounts = _read_json_list("accounts.json")
+        accounts = _read_json_list(ACCOUNTS_FILE)
         payload = json.dumps(accounts, ensure_ascii=False, indent=2).encode("utf-8")
         return web.Response(body=payload, content_type="application/json", headers={
             "Content-Disposition": 'attachment; filename="accounts-backup.json"'
@@ -999,7 +1013,7 @@ async def handle_import_accounts(request: web.Request) -> web.Response:
             if row.get("region"): row["region"]=str(row["region"]).strip().upper()
             clean.append(row); seen.add(uid)
         if not clean: raise ValueError("No se encontraron cuentas válidas")
-        existing=_read_json_list("accounts.json"); by_uid={str(a.get("uid")):a for a in existing if isinstance(a,dict) and a.get("uid")}
+        existing=_read_json_list(ACCOUNTS_FILE); by_uid={str(a.get("uid")):a for a in existing if isinstance(a,dict) and a.get("uid")}
         added=[]
         for row in clean:
             if row["uid"] not in by_uid:
@@ -1021,7 +1035,7 @@ async def handle_import_accounts(request: web.Request) -> web.Response:
 async def handle_add_account(request: web.Request) -> web.Response:
     try:
         data = await request.json()
-        accounts_file = "accounts.json"
+        accounts_file = ACCOUNTS_FILE
         existing = []
         if os.path.exists(accounts_file):
             try:
@@ -1132,7 +1146,7 @@ async def handle_delete_account(request: web.Request) -> web.Response:
                     target_tokens.add(str(t))
 
         # Also clean token_cache.json if entries match
-        token_cache_file = "token_cache.json"
+        token_cache_file = TOKEN_CACHE_FILE
         if os.path.exists(token_cache_file):
             try:
                 with open(token_cache_file, "r", encoding="utf-8") as f:
@@ -1157,7 +1171,7 @@ async def handle_delete_account(request: web.Request) -> web.Response:
                 pass
 
         # Remove from accounts.json
-        accounts_file = "accounts.json"
+        accounts_file = ACCOUNTS_FILE
         if os.path.exists(accounts_file):
             try:
                 with open(accounts_file, "r", encoding="utf-8") as f:
@@ -1183,7 +1197,7 @@ async def handle_delete_account(request: web.Request) -> web.Response:
                 pass
 
         # Remove matching devices from devices.json
-        devices_file = "devices.json"
+        devices_file = DEVICES_FILE
         if os.path.exists(devices_file):
             try:
                 with open(devices_file, "r", encoding="utf-8") as f:

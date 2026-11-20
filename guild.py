@@ -1,12 +1,16 @@
 import json
 import time
+import os
 import requests
+
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", "."))
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # API endpoint (do not change)
 API_BASE = "https://danger-guild-management-web.vercel.app/join"
 
 # File containing the accounts list
-ACCOUNTS_FILE = "accounts.json"
+ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 
 
 def load_accounts(filepath):

@@ -39,8 +39,10 @@ GENERATE_NICKNAME_URL = "https://loginbp.ppmainecoonghj.com/GenerateNickname"
 GETLOGIN_HOST_IND   = "client.ind.freefiremobile.com"
 GETLOGIN_HOST_OTHER = "clientbp.ggpolarbear.com"
 
-ACCOUNTS_FILE = "accounts.json"
-LOG_FILE      = "generator.log"
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", "."))
+os.makedirs(DATA_DIR, exist_ok=True)
+ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
+LOG_FILE      = os.path.join(DATA_DIR, "generator.log")
 
 # Fixed value from working version — DO NOT randomize
 X_GA_SV = "1789636317"
