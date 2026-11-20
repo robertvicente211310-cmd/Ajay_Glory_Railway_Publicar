@@ -510,33 +510,52 @@ class TelegramControl:
         return []
 
     async def _validate_and_store_account(self, row):
+        """Importa credenciales al almacenamiento local sin exigir login previo."""
         row = dict(row)
         uid = str(row.get("uid") or row.get("guest_uid") or "").strip()
         password = str(row.get("password") or row.get("guest_password") or "").strip()
         token = str(row.get("token") or row.get("access_token") or "").strip()
-        callback = bot_state.refresh_callbacks.get("on_import_account")
-        if not callback:
-            raise RuntimeError("El motor de autenticación todavía no está listo; inténtalo de nuevo en unos segundos.")
+        if not ((uid and password) or token):
+            raise ValueError("El archivo no contiene UID+contraseña ni token.")
+
+        saved = {}
         if uid and password:
-            result = await callback({"uid": uid, "password": password})
-            saved = {"uid": uid, "password": password}
-        elif token:
-            result = await callback({"token": token})
-            saved = {"token": token}
+            saved.update({"uid": uid, "password": password})
+            account_key = uid
         else:
-            raise ValueError("No encontré UID+contraseña ni token en el archivo.")
-        if not isinstance(result, dict) or not result.get("account_id"):
-            raise ValueError("Garena no validó las credenciales. Revisa el archivo, la contraseña o el token.")
-        account_id = str(result.get("account_id"))
-        saved.update({"uid": account_id, "nickname": result.get("nickname") or f"Player_{account_id}",
-                      "region": result.get("region") or "?", "level": int(result.get("level") or 1)})
+            saved["token"] = token
+            account_key = str(row.get("uid") or row.get("guest_uid") or "").strip()
+            if account_key:
+                saved["uid"] = account_key
+            else:
+                account_key = "token:" + token[:24]
+
+        nickname = str(row.get("nickname") or row.get("name") or "").strip()
+        region = str(row.get("region") or "").strip().upper()
+        level_value = row.get("level")
+        level = int(level_value) if str(level_value or "").isdigit() else None
+        saved.update({
+            "nickname": nickname or "Pendiente de consultar",
+            "region": region or "?",
+            "level": level,
+            "profile_pending": not bool(nickname and region and level is not None),
+        })
+
         current = self._read_data("accounts.json", [])
-        if not isinstance(current, list): current = []
-        index = next((i for i, item in enumerate(current) if isinstance(item, dict) and str(item.get("uid", "")) == account_id), None)
-        if index is None: current.append(saved); status = "nueva"
-        else: current[index].update(saved); status = "actualizada"
+        if not isinstance(current, list):
+            current = []
+        index = next((i for i, item in enumerate(current)
+                      if isinstance(item, dict) and (
+                          (uid and str(item.get("uid", "")) == uid) or
+                          (token and str(item.get("token", "")) == token)
+                      )), None)
+        if index is None:
+            current.append(saved)
+            status = "nueva"
+        else:
+            current[index].update(saved)
+            status = "actualizada"
         self._write_data_atomic("accounts.json", current)
-        # Importar y verificar no inicia partidas ni envía cuentas a clanes automáticamente.
         return status, saved
 
     async def _import_manual_account(self, update: Update, value: str):
@@ -582,7 +601,7 @@ class TelegramControl:
                 for row in rows:
                     try:
                         status, acc = await self._validate_and_store_account(row)
-                        results.append(f"✅ {html.escape(str(acc['nickname']))} | ID {html.escape(str(acc['uid']))} | Nivel {acc['level']} | Región {html.escape(str(acc['region']))} ({status})")
+                        results.append(f"✅ {html.escape(str(acc.get('nickname') or 'Pendiente de consultar'))} | ID {html.escape(str(acc.get('uid') or 'pendiente'))} | Nivel {html.escape(str(acc.get('level') or 'pendiente'))} | Región {html.escape(str(acc.get('region') or 'pendiente'))} ({status}; guardada)")
                     except Exception as exc:
                         results.append(f"❌ {html.escape(str(exc))}")
                 await update.effective_message.reply_text("<b>RESULTADO DE IMPORTACIÓN</b>\n\n" + "\n".join(results), parse_mode=ParseMode.HTML, reply_markup=self.panel())
@@ -603,7 +622,7 @@ class TelegramControl:
             if isinstance(bundle.get(name), dict):
                 self._write_data_atomic(name + ".json", bundle[name])
         if isinstance(bundle.get("clan_points"), dict): self._save_clan_points_config(bundle["clan_points"])
-        await update.effective_message.reply_text(f"Respaldo procesado. Cuentas validadas: {imported}; fallidas: {failed}.", reply_markup=self.panel())
+        await update.effective_message.reply_text(f"Respaldo procesado. Cuentas guardadas: {imported}; fallidas: {failed}.", reply_markup=self.panel())
 
     async def command_delete(self, update, context):
         if not await self.reject_or_continue(update): return
