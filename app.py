@@ -43,8 +43,8 @@ EXP_REFRESH_AFTER_MATCH_DELAY = 9.0
 MAX_CONSECUTIVE_PARSE_FAILURES = 5
 NON_MATCH_RECONNECT_DELAY      = 1.0
 
-# ⭐ Only Battle Royale
-BR_MODE_ID             = 1
+# ⭐ Only Clash Squad
+BR_MODE_ID             = 2
 BR_MAP_ID              = 1
 
 ANTI_AFK_MIN_INTERVAL  = 1.8
@@ -1403,7 +1403,7 @@ async def build_match_startup_packets(token, udp_key, match_code, account_id, bl
                                       server_ip="", region="ID", client_version="1.132.6",
                                       client_version_code="2019121229", access_token="",
                                       mode_id=BR_MODE_ID, map_id=BR_MAP_ID):
-    if int(mode_id) != BR_MODE_ID:          # sirf Battle Royale - koi aur mode kabhi nahi khelna
+    if int(mode_id) != BR_MODE_ID:          # solo el modo configurado (Clash Squad)
         mode_id, map_id = BR_MODE_ID, BR_MAP_ID
     token = token.strip()
     udp_key = bytes.fromhex(udp_key)
@@ -2438,7 +2438,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                 acc_tok = current_account_data.get('access_token', '') if current_account_data else ""
                                 # ⭐ Always Battle Royale
                                 mid, mp = BR_MODE_ID, BR_MAP_ID
-                                tag = "BATTLE_ROYALE"
+                                tag = "CLASH_SQUAD"
                                 print_info(f"[TARGET] {tag} mid={mid} mp={mp}")
                                 thunder, sharma = await build_match_startup_packets(
                                     token, udp_key, match_code, effective, block_val or 0,

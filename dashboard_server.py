@@ -474,8 +474,8 @@ class BotState:
         prog = calculate_level_progress(level or 1, exp)
 
         lvl_val = level or 1
-        acc_mode = "BR" if lvl_val < 3 else "LONE_WOLF"
-        acc_mode_label = "Battle Royale (Lvl < 3)" if lvl_val < 3 else "Lone Wolf (Lvl 3+)"
+        acc_mode = "CS" if lvl_val < 3 else "LONE_WOLF"
+        acc_mode_label = "Clash Squad" if lvl_val < 3 else "Lone Wolf (Lvl 3+)"
 
         if uid_str not in self.accounts:
             self.accounts[uid_str] = {
@@ -636,25 +636,25 @@ class BotState:
             acc["gained_exp"] = max(0, current_exp - acc["initial_exp"])
             
             current_lvl = acc["level"]
-            acc["mode"] = "BR" if current_lvl < 3 else "LONE_WOLF"
-            acc["mode_label"] = "Battle Royale (Lvl < 3)" if current_lvl < 3 else "Lone Wolf (Lvl 3+)"
+acc["mode"] = "BR"
+acc["mode_label"] = "Clash Squad"
 
-            prog = calculate_level_progress(acc["level"], current_exp)
-            acc["next_level"] = prog["next_level"]
-            acc["remaining_exp"] = prog["remaining_exp"]
-            acc["target_exp"] = prog["target_exp"]
-            acc["needed_for_level"] = prog["needed_for_level"]
-            acc["earned_in_level"] = prog["earned_in_level"]
-            acc["progress_pct"] = prog["progress_pct"]
-            acc["last_updated"] = time.strftime("%H:%M:%S")
+prog = calculate_level_progress(acc["level"], current_exp)
+acc["next_level"] = prog["next_level"]
+acc["remaining_exp"] = prog["remaining_exp"]
+acc["target_exp"] = prog["target_exp"]
+acc["needed_for_level"] = prog["needed_for_level"]
+acc["earned_in_level"] = prog["earned_in_level"]
+acc["progress_pct"] = prog["progress_pct"]
+acc["last_updated"] = time.strftime("%H:%M:%S")
 
-            # Check for Level 2 -> 3 Mode Transition
-            if old_level < 3 and current_lvl >= 3:
-                self.log(
-                    f"🎉 LEVEL UP! UID {uid_str} ({acc['nickname']}) reached Level {current_lvl}! Switching from Battle Royale to Lone Wolf mode!",
-                    "success",
-                    uid_str
-                )
+# Level up (sin cambio de modo)
+if old_level < 3 and current_lvl >= 3:
+    self.log(
+        f"🎉 LEVEL UP! UID {uid_str} ({acc['nickname']}) reached Level {current_lvl}!",
+        "success",
+        uid_str
+    )
 
             diff = current_exp - old_exp
             if diff > 0:
