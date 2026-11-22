@@ -386,6 +386,10 @@ class TelegramControl:
         if not document:
             await update.effective_message.reply_text("Adjunta el JSON exportado por el botón EXPORTAR CUENTAS o un archivo .dat de Garena.")
             return
+        filename = str(document.file_name or "cuenta.dat")
+        # Confirmación inmediata: evita que el usuario quede sin saber si Telegram
+        # entregó el documento al bot mientras se descarga/procesa.
+        await update.effective_message.reply_text(f"📥 Recibí {filename}. Procesando la cuenta DAT…")
         if document.file_size and document.file_size > 15 * 1024 * 1024:
             await update.effective_message.reply_text("El archivo supera el límite de 15 MB.")
             return
@@ -393,14 +397,13 @@ class TelegramControl:
             remote = await document.get_file()
             raw = bytes(await remote.download_as_bytearray())
             data = json.loads(raw.decode("utf-8"))
-            is_dat = str(document.file_name or "").lower().endswith(".dat")
             if isinstance(data, dict) and isinstance(data.get("guest_account_info"), dict):
                 guest = data.get("guest_account_info") or {}
                 uid = str(guest.get("com.garena.msdk.guest_uid") or "").strip()
                 password = str(guest.get("com.garena.msdk.guest_password") or "").strip()
                 if not uid or not password:
                     raise ValueError("El DAT no contiene guest_uid y guest_password válidos")
-                data = [{"uid": uid, "password": password, "auth_type": "dat", "source_file": document.file_name}]
+                data = [{"uid": uid, "password": password, "auth_type": "dat", "source_file": filename}]
             if isinstance(data, list):
                 bundle = {"accounts": data}
             elif isinstance(data, dict) and isinstance(data.get("accounts"), list):
