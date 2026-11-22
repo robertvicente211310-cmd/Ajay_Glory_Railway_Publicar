@@ -40,6 +40,7 @@ class TelegramControl:
         self._page_size = 8
         self.pending_deletes: set[tuple[int, str]] = set()
         self.pending_imports: set[int] = set()
+        self.pending_manual_dat: dict[int, str] = {}
         self.wizards: dict[int, dict] = {}
 
     async def reject_or_continue(self, update: Update) -> bool:
@@ -58,6 +59,7 @@ class TelegramControl:
             [InlineKeyboardButton("🏰 CONFIGURACIÓN DEL GREMIO", callback_data="view:guild"), InlineKeyboardButton("🤝 AMISTADES AUTO", callback_data="view:friends")],
             [InlineKeyboardButton("🚀 GENERAR + CLAN + JUGAR", callback_data="wizard:start"), InlineKeyboardButton("🔄 PROGRESO", callback_data="view:automation")],
             [InlineKeyboardButton("🎟️ CUENTAS AGREGADAS → CLAN + JUGAR", callback_data="existing:start")],
+            [InlineKeyboardButton("➕ AGREGAR DAT MANUAL", callback_data="dat:manual")],
             [InlineKeyboardButton("📤 EXPORTAR CUENTAS", callback_data="data:export"), InlineKeyboardButton("📥 IMPORTAR CUENTAS", callback_data="data:import")],
             [InlineKeyboardButton("📋 REGISTRO DE ACTIVIDAD", callback_data="view:logs"), InlineKeyboardButton("🔄 ACTUALIZAR", callback_data="panel")],
             [InlineKeyboardButton("⚙️ CONFIGURACIÓN", callback_data="view:config")],
@@ -180,9 +182,19 @@ class TelegramControl:
 
     async def wizard_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self.reject_or_continue(update): return
-        uid = update.effective_user.id; state = self.wizards.get(uid)
-        if not state or state.get("step") not in {"guild", "guild_existing"}: return
+        uid = update.effective_user.id
+        manual_stage = self.pending_manual_dat.get(uid)
         value = (update.effective_message.text or "").strip()
+        if manual_stage == "uid":
+            if not value.isdigit():
+                await update.effective_message.reply_text("El guest_uid debe contener solo números.", reply_markup=ForceReply(selective=True)); return
+            self.pending_manual_dat[uid] = "password:" + value
+            await update.effective_message.reply_text("Ahora responde con el guest_account_info del DAT:", reply_markup=ForceReply(selective=True)); return
+        if manual_stage and manual_stage.startswith("password:"):
+            self.pending_manual_dat.pop(uid, None)
+            return await self.add_manual_dat(update, manual_stage.split(":", 1)[1], value)
+        state = self.wizards.get(uid)
+        if not state or state.get("step") not in {"guild", "guild_existing"}: return
         if not value.isdigit():
             await update.effective_message.reply_text("El ID del clan debe contener solo números.", reply_markup=ForceReply(selective=True)); return
         state.update({"guild_id": value, "step": "region", "mode": "existing" if state.get("step") == "guild_existing" else "generate"})
@@ -288,6 +300,10 @@ class TelegramControl:
             return await self.wizard_start(update)
         if data == "existing:start":
             return await self.existing_start(update)
+        if data == "dat:manual":
+            self.pending_manual_dat[query.from_user.id] = "uid"
+            await query.edit_message_text("➕ <b>AGREGAR DAT MANUAL</b>\n\nResponde a este mensaje con el guest_uid numérico.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="panel")]]))
+            return await query.message.reply_text("guest_uid:", reply_markup=ForceReply(selective=True))
         if data == "wiz:askguild":
             self.wizards[query.from_user.id] = {"step": "guild"}
             await query.edit_message_text("Escribe ahora el ID numérico del clan:")
@@ -346,6 +362,13 @@ class TelegramControl:
             return
         bot_state.automation_task = asyncio.create_task(_run_automation(guild_id, region, total, threads, True))
         await update.effective_message.reply_text(f"Automatización iniciada: generar {total} cuenta(s), enviar al clan {guild_id} ({region}) y comenzar Glory. Usa PROGRESO para consultar.")
+
+    async def command_add_dat(self, update, context):
+        if not await self.reject_or_continue(update): return
+        if len(context.args) != 2:
+            await update.effective_message.reply_text("Uso: /agregardat guest_uid guest_account_info\nEjemplo: /agregardat 8428044256 C911B5640C816C0A1BA1AA0A418E76C3E86B2C8C8AA30D5EE6C38E7A157E1E01")
+            return
+        await self.add_manual_dat(update, str(context.args[0]).strip(), str(context.args[1]).strip())
 
     def _data_path(self, name: str) -> str:
         return os.path.join(os.getenv("DATA_DIR", "."), name)
@@ -443,8 +466,14 @@ class TelegramControl:
                 k = key(row)
                 if k in index:
                     if row.get("auth_type") == "dat":
-                        # Un DAT es inmutable: no sustituir token ni credenciales existentes.
-                        updated += 0
+                        # Si el UID ya existía como guest normal, convertirlo a DAT.
+                        old = dict(merged[index[k]])
+                        old.update(row)
+                        old.pop("token", None); old.pop("game_token", None)
+                        old.pop("auth_token", None); old.pop("auth_uid", None)
+                        old["auth_type"] = "dat"
+                        merged[index[k]] = old
+                        updated += 1
                     else:
                         merged[index[k]].update(row); updated += 1
                 else:
@@ -477,6 +506,26 @@ class TelegramControl:
             await update.effective_message.reply_text(f"Importación completada. Nuevas: {added}, actualizadas: {updated}, workers reiniciados: {restarted}. El orden importado se conserva para reconstruir las escuadras.")
         except Exception as exc:
             await update.effective_message.reply_text(f"No se pudo importar el respaldo: {exc}")
+
+    async def add_manual_dat(self, update: Update, uid: str, password: str):
+        """Guarda manualmente el par guest_uid/guest_account_info como DAT."""
+        if not uid.isdigit() or not password:
+            await update.effective_message.reply_text("Formato inválido. Usa UID numérico y guest_account_info no vacío.")
+            return
+        row = {"uid": uid, "password": password, "auth_type": "dat", "source_file": "manual"}
+        path = self._data_path("accounts.json")
+        rows = self._read_data("accounts.json", [])
+        if not isinstance(rows, list): rows = []
+        found = False
+        for i, old in enumerate(rows):
+            if isinstance(old, dict) and str(old.get("uid", "")).strip() == uid:
+                rows[i] = row; found = True; break
+        if not found: rows.append(row)
+        self._write_data_atomic("accounts.json", rows)
+        cb = bot_state.refresh_callbacks.get("on_account_added")
+        if cb and bot_state.glory_started:
+            await cb(row)
+        await update.effective_message.reply_text(f"✅ Cuenta DAT {'reemplazada' if found else 'agregada'}: UID {uid}.\nNo se guardó ningún token nuevo. Ya puedes usar CUENTAS AGREGADAS → CLAN + JUGAR.")
 
     async def command_delete(self, update, context):
         if not await self.reject_or_continue(update): return
@@ -530,7 +579,7 @@ class TelegramControl:
         await update.effective_message.reply_text(f"Gremio guardado: {guild_id} ({region}).")
 
     async def help_command(self, update, context):
-        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /exportar /importar /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
+        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /agregardat UID guest_account_info /exportar /importar /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
 
     async def notify(self, message: str, level: str = "info"):
         if not self.application or not _admin_ids(): return
@@ -558,6 +607,7 @@ class TelegramControl:
         self.application.add_handler(CommandHandler("logs", self.command_logs))
         self.application.add_handler(CommandHandler("eliminar", self.command_delete))
         self.application.add_handler(CommandHandler("generar", self.command_generate))
+        self.application.add_handler(CommandHandler("agregardat", self.command_add_dat))
         self.application.add_handler(CommandHandler("exportar", self.export_accounts))
         self.application.add_handler(CommandHandler("importar", self.import_accounts))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.wizard_text))
