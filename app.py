@@ -44,7 +44,7 @@ MAX_CONSECUTIVE_PARSE_FAILURES = 5
 NON_MATCH_RECONNECT_DELAY      = 1.0
 
 # ⭐ Only Clash Squad
-BR_MODE_ID             = 1
+BR_MODE_ID             = 2
 BR_MAP_ID              = 1
 
 ANTI_AFK_MIN_INTERVAL  = 1.8
@@ -581,7 +581,8 @@ def _banned_record(key):
 
 def _login_retry_delay(fails):
     """15s, 30s, 60s ... max 120s; evita dejar la cuenta congelada 480s."""
-    return min(120, 15 * (2 ** min(max(fails, 1) - 1, 6)))
+    _d = min(120, 15 * (2 ** min(max(fails, 1) - 1, 6)))
+    return _d + random.uniform(0, _d * 0.3)
 
 async def _team_member_join(uid):
     uid = str(uid)
@@ -699,7 +700,9 @@ def cache_get_for_connect(key):
             jexp = _jwt_exp(e.get("token"))
             if jexp: exp_at = min(exp_at, jexp)
             left = exp_at - time.time()
-            if left <= TOKEN_REFRESH_AHEAD:
+            import zlib
+            _ahead = TOKEN_REFRESH_AHEAD + (zlib.crc32(str(key).encode()) % 600)   # 10-20 min, distinto por cuenta
+            if left <= _ahead:
                 if left > 0:
                     print_info(f"[TOKEN] {key}: expiry mein {int(left // 60)} min {int(left % 60)}s bache -> match se pehle naya token le raha hoon")
                 return None
@@ -707,11 +710,30 @@ def cache_get_for_connect(key):
         pass
     return cache_get(key)
 
+def _token_left(data):
+    """Segundos de vida que le quedan al token actual de la cuenta (0 si no se puede saber)."""
+    try:
+        key = data.get('auth_uid') or (f"tok_{data['auth_token'][:20]}" if data.get('auth_token') else None)
+        e = _load_token_cache().get(str(key)) if key else None
+        exp_at = (e.get("cached_at", 0) + TOKEN_CACHE_TTL) if e else 0
+        jexp = _jwt_exp((e or {}).get("token") or data.get("token"))
+        if jexp: exp_at = min(exp_at, jexp) if exp_at else jexp
+        return exp_at - time.time() if exp_at else 0
+    except Exception:
+        return 0
+
 def cache_set(uid, data):
     cache = _load_token_cache()
     e = dict(data); e["cached_at"] = time.time()
     cache[str(uid)] = e; _save_token_cache(cache)
     print_success(f"[CACHE] Saved UID {uid}")
+    try:
+        _jx = _jwt_exp(e.get("token"))
+        if _jx:
+            print_info(f"[TOKEN] {uid}: duracion real del token = {int((_jx - time.time()) // 60)} min (cache del bot: {TOKEN_CACHE_TTL // 60} min)")
+        else:
+            print_info(f"[TOKEN] {uid}: el token no trae fecha de expiracion legible (se usa el cache del bot: {TOKEN_CACHE_TTL // 60} min)")
+    except Exception: pass
 
 def cache_invalidate(uid):
     cache = _load_token_cache()
@@ -1005,10 +1027,55 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
     except Exception as e:
         print_error(f"build_majorlogin_payload: {e}"); return None
 
+USE_NEW_LOGIN_PAYLOAD = True   # True = payload de login igual al del otro bot (app_1.py); False = el anterior
+
+def _new_login_payloads(open_id, access_token, platform, version, lang_code="hi"):
+    p = {
+        3: str(datetime.now())[:-7], 4: "free fire", 5: 1, 7: f"{version}",
+        8: "Android OS 14 / API-34 (UP1A.231005.007/E135FXXSEEZE2)",
+        9: "Handheld", 11: "CarrierDataNetwork",
+        12: 1672, 13: 750, 14: "338",
+        15: "ARMv7 VFPv3 NEON | 2002 | 8", 16: 3702, 17: "Mali-G52",
+        18: "OpenGL ES 3.2 v1.r38p1-01bet0-mbs2v41_0.6d20ec041e51b2f2d25dfc265586ebe8",
+        19: f"Google|{uuid.uuid4()}", 20: "104.28.197.151", 21: lang_code,
+        22: f"{open_id}", 23: f"{platform}", 24: "Handheld",
+        25: "samsung SM-E135F", 26: "IND",
+        29: f"{access_token}", 30: 1, 42: "Cellular",
+        57: "7428b253defc164018c604a1ebbfebdf",
+        60: 52037, 61: 5355, 62: 3723, 63: 3,
+        64: 5483, 65: 52037, 66: 5483, 67: 52037,
+        73: 2,
+        74: "/data/app/~~yACsV8QOk9OexgajWQP30A==/com.dts.freefireth-Bi_wPVrrhYM2nYncc29q7Q==/lib/arm",
+        76: 1,
+        77: "b8e0cd5e295eee42f5860d3c86e483dd|/data/app/~~yACsV8QOk9OexgajWQP30A==/com.dts.freefireth-Bi_wPVrrhYM2nYncc29q7Q==/base.apk",
+        78: 3, 79: 1, 81: "32", 83: "2019121229",
+        86: "OpenGLES2", 87: 8191, 88: int(platform),
+        92: 16091, 93: "android",
+        94: "KqsHT3Yeqo3RLRl8efNiL3aL/1SHwlSrtK0DwNAqdkNBQz70TeVy+icaIwuR3UK4b65Uf3IG5xBFEv0uu+jQZI+rOYCmNCsXjJT4QcZaYgoaaUGG",
+        95: 111107, 96: "{\"cur_rate\":null,\"support_etc2\":false}",
+        97: 1, 98: 1, 99: f"{platform}", 100: f"{platform}",
+        102: "4503454457550c0766", 104: 53792, 105: 1,
+        106: "https://dl-bs.ggpolarbear.com/live/ABHotUpdates/|https://core-bs.ggpolarbear.com/live/ABHotUpdates/|6b2078db9d22dd98f8e9386a39af8462",
+        107: "c8e41b7a93f02d56e1a94c7b8203f5d1",
+    }
+    g = dict(p); g[90] = "Mumbai"; g[91] = "D"; g[99] = "0"; g[103] = 1
+    return encrypt_api_bytes(build_proto(p)), encrypt_api_bytes(build_proto(g))
+
+async def build_login_payloads(open_id, access_token, platform, client_version, dev):
+    """Devuelve (payload_MajorLogin, payload_GetLoginData)."""
+    if USE_NEW_LOGIN_PAYLOAD:
+        try:
+            return _new_login_payloads(open_id, access_token, platform, client_version)
+        except Exception as e:
+            print_error(f"build_login_payloads: {e}")
+    old = await build_majorlogin_payload(open_id, access_token, platform, client_version, dev)
+    return old, old
+
 async def send_majorlogin(data, release_version, server_url):
     try:
         url = f"{server_url}MajorLogin" if server_url.endswith('/') else f"{server_url}/MajorLogin"
         hdrs = headers.copy(); hdrs["ReleaseVersion"] = str(release_version)
+        hdrs["X-GA-SV"] = str(int(time.time())); hdrs["Authorization"] = "Bearer "
         r = await client.post(url, headers=hdrs, data=data)
         if r.status_code != 200:
             print_error(f"[MAJORLOGIN] HTTP {r.status_code}"); return None
@@ -1032,6 +1099,7 @@ async def send_getlogin(data, base_url, token, release_version):
         url = f"{base_url.rstrip('/')}/GetLoginData"
         hdrs = headers.copy()
         hdrs["ReleaseVersion"] = release_version
+        hdrs["X-GA-SV"] = str(int(time.time()))
         hdrs['Authorization'] = f"Bearer {token}"
         hdrs['Host'] = "clientbp.ppmainecoonghj.com"
         r = await client.post(url, headers=hdrs, data=data)
@@ -2257,6 +2325,10 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                         except Exception: pass
                     else:
                         print_warning(f"[FUNC] Cache miss {uid_str} -> attempting re-login...")
+                        if '_exp_at' not in current_account_data:
+                            _l0 = _token_left(current_account_data)
+                            current_account_data['_exp_at'] = time.time() + _l0 if _l0 > 0 else 0
+                        _old_left = current_account_data.get('_exp_at', 0) - time.time()
                         try:
                             if current_account_data.get('auth_uid'):
                                 cache_invalidate(str(current_account_data['auth_uid']))
@@ -2279,8 +2351,12 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
                                 raise ConnectionError("Re-login returned empty credentials")
                         except Exception as re_err:
                             print_error(f"[FUNC] Re-login failed for {uid_str}: {re_err}")
-                            await asyncio.sleep(5)
-                            raise ConnectionError("Cache expired")
+                            if _old_left > 90:
+                                print_warning(f"[FUNC] {uid_str}: sigo con el token actual (quedan {int(_old_left)}s), reintento el login en la proxima partida")
+                                await asyncio.sleep(random.uniform(5, 15))
+                            else:
+                                await asyncio.sleep(5)
+                                raise ConnectionError("Cache expired")
 
                 try:
                     if uid_str in bot_state.accounts:
@@ -2680,7 +2756,19 @@ async def refresh_account_profile(ad_or_uid):
             print_success(f"[EXP] {acc_id} Lvl{level} +{exp - old_ex}")
     except Exception: pass
 
+_LOGIN_SEM = None
+LOGIN_MAX_CONCURRENT = 3        # logins simultaneos maximos (evita rafagas contra el servidor)
+
 async def process_account_uid_pass(uid, password, persist=True):
+    """Envoltorio: limita logins simultaneos y los escalona con una pausa aleatoria."""
+    global _LOGIN_SEM
+    if _LOGIN_SEM is None:
+        _LOGIN_SEM = asyncio.Semaphore(LOGIN_MAX_CONCURRENT)
+    async with _LOGIN_SEM:
+        await asyncio.sleep(random.uniform(0.5, 2.0))
+        return await _process_account_uid_pass_inner(uid, password, persist=persist)
+
+async def _process_account_uid_pass_inner(uid, password, persist=True):
     cached = cache_get_for_connect(uid)
     if cached:
         # Cachés antiguas podían no conservar las credenciales de origen.
@@ -2709,7 +2797,7 @@ async def process_account_uid_pass(uid, password, persist=True):
             return None
         oid, at, pf = tg
         dev = get_device_for_account(uid)
-        lpd = await build_majorlogin_payload(oid, at, pf, cv, dev)
+        lpd, lpd_gl = await build_login_payloads(oid, at, pf, cv, dev)
         if not lpd:
             print_error(f"[LOGIN] UID {uid}: no se pudo construir MajorLogin")
             return None
@@ -2719,7 +2807,7 @@ async def process_account_uid_pass(uid, password, persist=True):
         if mresp is None:
             print_error(f"[LOGIN] UID {uid}: MajorLogin no devolvió credenciales")
             return None
-        gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
+        gl = await send_getlogin(lpd_gl, mresp.url, mresp.token, rel)
         if gl is None:
             print_error(f"[LOGIN] UID {uid}: GetLoginData falló")
             return None
@@ -2742,7 +2830,7 @@ async def process_account_uid_pass(uid, password, persist=True):
             'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
             'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
             'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
-            'login_payload_data': lpd,
+            'login_payload_data': lpd_gl,
             'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password,
         }
         _register_credentials(ad)
@@ -2789,7 +2877,7 @@ async def process_account_token(access_token):
             print_error("[LOGIN] Token inspect no devolvió open_id")
             return None
         dev = get_device_for_account(oid)
-        lpd = await build_majorlogin_payload(oid, access_token, str(pf), cv, dev)
+        lpd, lpd_gl = await build_login_payloads(oid, access_token, str(pf), cv, dev)
         if not lpd:
             print_error("[LOGIN] Token: no se pudo construir MajorLogin")
             return None
@@ -2799,7 +2887,7 @@ async def process_account_token(access_token):
         if mresp is None:
             print_error("[LOGIN] Token: MajorLogin no devolvió credenciales")
             return None
-        gl = await send_getlogin(lpd, mresp.url, mresp.token, rel)
+        gl = await send_getlogin(lpd_gl, mresp.url, mresp.token, rel)
         if gl is None:
             print_error("[LOGIN] Token: GetLoginData falló")
             return None
@@ -2821,7 +2909,7 @@ async def process_account_token(access_token):
             'functional_addrs': rp.functional_addrs or get_proto_field(dd, 14),
             'informational_addrs': rp.informational_addrs or get_proto_field(dd, 32),
             'release_version': rel, 'client_version': cv, 'server_url': mresp.url,
-            'login_payload_data': lpd,
+            'login_payload_data': lpd_gl,
             'auth_type': 'token', 'auth_token': access_token,
         }
         _register_credentials(ad); cache_set(cache_key, ad); return ad
