@@ -635,26 +635,26 @@ class BotState:
                 acc["level"] = level
             acc["gained_exp"] = max(0, current_exp - acc["initial_exp"])
             
-            current_lvl = acc["level"]
-acc["mode"] = "BR"
-acc["mode_label"] = "Clash Squad"
+                        current_lvl = acc["level"]
+            acc["mode"] = "BR"
+            acc["mode_label"] = "Clash Squad"
 
-prog = calculate_level_progress(acc["level"], current_exp)
-acc["next_level"] = prog["next_level"]
-acc["remaining_exp"] = prog["remaining_exp"]
-acc["target_exp"] = prog["target_exp"]
-acc["needed_for_level"] = prog["needed_for_level"]
-acc["earned_in_level"] = prog["earned_in_level"]
-acc["progress_pct"] = prog["progress_pct"]
-acc["last_updated"] = time.strftime("%H:%M:%S")
+            prog = calculate_level_progress(acc["level"], current_exp)
+            acc["next_level"] = prog["next_level"]
+            acc["remaining_exp"] = prog["remaining_exp"]
+            acc["target_exp"] = prog["target_exp"]
+            acc["needed_for_level"] = prog["needed_for_level"]
+            acc["earned_in_level"] = prog["earned_in_level"]
+            acc["progress_pct"] = prog["progress_pct"]
+            acc["last_updated"] = time.strftime("%H:%M:%S")
 
-# Level up (sin cambio de modo)
-if old_level < 3 and current_lvl >= 3:
-    self.log(
-        f"🎉 LEVEL UP! UID {uid_str} ({acc['nickname']}) reached Level {current_lvl}!",
-        "success",
-        uid_str
-    )
+            # Level up (sin cambio de modo)
+            if old_level < 3 and current_lvl >= 3:
+                self.log(
+                    f"🎉 LEVEL UP! UID {uid_str} ({acc['nickname']}) reached Level {current_lvl}!",
+                    "success",
+                    uid_str
+                )
 
             diff = current_exp - old_exp
             if diff > 0:
