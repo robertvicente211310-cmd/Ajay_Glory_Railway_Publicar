@@ -39,6 +39,7 @@ class TelegramControl:
         self.last_notice: dict[str, float] = {}
         self._page_size = 8
         self.pending_deletes: set[tuple[int, str]] = set()
+        self.pending_imports: set[int] = set()
         self.wizards: dict[int, dict] = {}
 
     async def reject_or_continue(self, update: Update) -> bool:
@@ -304,7 +305,9 @@ class TelegramControl:
         if data == "data:export":
             return await self.export_accounts(update)
         if data == "data:import":
-            return await query.edit_message_text("📥 <b>IMPORTAR CUENTAS</b>\n\nAdjunta aquí un respaldo JSON o un archivo <b>.dat de Garena</b>.\n\nEl DAT se guardará como cuenta protegida: no se generará ni se renovará ningún token. Después de importarlo, usa <b>🎟️ CUENTAS AGREGADAS → CLAN + JUGAR</b>.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
+            self.pending_imports.add(query.from_user.id)
+            await query.edit_message_text("📥 <b>IMPORTAR CUENTAS</b>\n\nPreparado. Ahora responde a este mensaje adjuntando el archivo <b>.dat de Garena</b> o el respaldo JSON.\n\nEl DAT se guardará protegido: no se generará ni se renovará ningún token.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancelar", callback_data="panel")]]))
+            return await query.message.reply_text("📎 Adjunta ahora el archivo y usa la opción <b>Responder</b> sobre este mensaje.\n\nCuando termine, usa 🎟️ CUENTAS AGREGADAS → CLAN + JUGAR.", parse_mode=ParseMode.HTML, reply_markup=ForceReply(selective=True))
         if data == "automation:help":
             return await query.edit_message_text("🚀 <b>GENERAR + CLAN + JUGAR</b>\n\nUsa el comando:\n<code>/generar CANTIDAD HILOS ID_CLAN REGION</code>\n\nEjemplo: <code>/generar 4 2 2068400598 NA</code>\n\nEl flujo usa el generador original, consulta el clan, envía las cuentas al clan y arranca los workers de Glory.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
         if data.startswith("delete:yes:"):
@@ -382,10 +385,16 @@ class TelegramControl:
 
     async def import_accounts(self, update: Update):
         if not await self.reject_or_continue(update): return
+        user_id = update.effective_user.id if update.effective_user else 0
         document = update.effective_message.document
         if not document:
-            await update.effective_message.reply_text("Adjunta el JSON exportado por el botón EXPORTAR CUENTAS o un archivo .dat de Garena.")
+            self.pending_imports.add(user_id)
+            await update.effective_message.reply_text("📥 IMPORTAR CUENTAS\n\nResponde a este mensaje adjuntando el archivo .dat de Garena o el respaldo JSON.", reply_markup=ForceReply(selective=True))
             return
+        if user_id not in self.pending_imports:
+            await update.effective_message.reply_text("Primero pulsa 📥 IMPORTAR CUENTAS y luego responde al mensaje de importación adjuntando el archivo.")
+            return
+        self.pending_imports.discard(user_id)
         filename = str(document.file_name or "cuenta.dat")
         # Confirmación inmediata: evita que el usuario quede sin saber si Telegram
         # entregó el documento al bot mientras se descarga/procesa.
