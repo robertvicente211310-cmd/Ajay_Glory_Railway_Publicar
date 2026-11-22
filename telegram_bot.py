@@ -304,7 +304,7 @@ class TelegramControl:
         if data == "data:export":
             return await self.export_accounts(update)
         if data == "data:import":
-            return await query.edit_message_text("📥 <b>IMPORTAR CUENTAS</b>\n\nAdjunta aquí el archivo JSON descargado con EXPORTAR CUENTAS. La importación fusionará los datos y reiniciará las cuentas si Glory está activo.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
+            return await query.edit_message_text("📥 <b>IMPORTAR CUENTAS</b>\n\nAdjunta aquí un respaldo JSON o un archivo <b>.dat de Garena</b>.\n\nEl DAT se guardará como cuenta protegida: no se generará ni se renovará ningún token. Después de importarlo, usa <b>🎟️ CUENTAS AGREGADAS → CLAN + JUGAR</b>.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
         if data == "automation:help":
             return await query.edit_message_text("🚀 <b>GENERAR + CLAN + JUGAR</b>\n\nUsa el comando:\n<code>/generar CANTIDAD HILOS ID_CLAN REGION</code>\n\nEjemplo: <code>/generar 4 2 2068400598 NA</code>\n\nEl flujo usa el generador original, consulta el clan, envía las cuentas al clan y arranca los workers de Glory.", parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]]))
         if data.startswith("delete:yes:"):
@@ -394,7 +394,7 @@ class TelegramControl:
             raw = bytes(await remote.download_as_bytearray())
             data = json.loads(raw.decode("utf-8"))
             is_dat = str(document.file_name or "").lower().endswith(".dat")
-            if is_dat and isinstance(data, dict):
+            if isinstance(data, dict) and isinstance(data.get("guest_account_info"), dict):
                 guest = data.get("guest_account_info") or {}
                 uid = str(guest.get("com.garena.msdk.guest_uid") or "").strip()
                 password = str(guest.get("com.garena.msdk.guest_password") or "").strip()
