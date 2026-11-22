@@ -474,8 +474,8 @@ class BotState:
         prog = calculate_level_progress(level or 1, exp)
 
         lvl_val = level or 1
-        acc_mode = "CS" if lvl_val < 3 else "LONE_WOLF"
-        acc_mode_label = "Clash Squad" if lvl_val < 3 else "Lone Wolf (Lvl 3+)"
+        acc_mode = "BR"
+        acc_mode_label = "Clash Squad"
 
         if uid_str not in self.accounts:
             self.accounts[uid_str] = {
@@ -635,7 +635,7 @@ class BotState:
                 acc["level"] = level
             acc["gained_exp"] = max(0, current_exp - acc["initial_exp"])
             
-                        current_lvl = acc["level"]
+            current_lvl = acc["level"]
             acc["mode"] = "BR"
             acc["mode_label"] = "Clash Squad"
 
@@ -678,7 +678,7 @@ class BotState:
 
     def get_account_mode(self, uid: str) -> str:
         lvl = self.get_account_level(uid)
-        return "BR" if lvl < 3 else "LONE_WOLF"
+        return "BR"
 
     def update_status(self, uid: str, status: str, active_matches: Optional[int] = None):
         uid_str = str(uid)
