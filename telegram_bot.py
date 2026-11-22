@@ -40,7 +40,6 @@ class TelegramControl:
         self._page_size = 8
         self.pending_deletes: set[tuple[int, str]] = set()
         self.wizards: dict[int, dict] = {}
-        self.pending_account_import: set[int] = set()
 
     async def reject_or_continue(self, update: Update) -> bool:
         if _authorized(update):
@@ -57,9 +56,8 @@ class TelegramControl:
             [InlineKeyboardButton("👁️ CUENTAS JUGANDO", callback_data="view:playing"), InlineKeyboardButton("🏆 EXP POR CUENTA", callback_data="view:exp")],
             [InlineKeyboardButton("🏰 CONFIGURACIÓN DEL GREMIO", callback_data="view:guild"), InlineKeyboardButton("🤝 AMISTADES AUTO", callback_data="view:friends")],
             [InlineKeyboardButton("🚀 GENERAR + CLAN + JUGAR", callback_data="wizard:start"), InlineKeyboardButton("🔄 PROGRESO", callback_data="view:automation")],
-            [InlineKeyboardButton("📤 EXPORTAR CUENTAS", callback_data="data:export"), InlineKeyboardButton("📥 AGREGAR CUENTA", callback_data="accounts:add")],
-            [InlineKeyboardButton("📂 IMPORTAR RESPALDO", callback_data="data:import")],
-            [InlineKeyboardButton("🔑 RENOVAR TOKENS VENCIDOS", callback_data="token:refresh:all")],
+            [InlineKeyboardButton("🎟️ CUENTAS AGREGADAS → CLAN + JUGAR", callback_data="existing:start")],
+            [InlineKeyboardButton("📤 EXPORTAR CUENTAS", callback_data="data:export"), InlineKeyboardButton("📥 IMPORTAR CUENTAS", callback_data="data:import")],
             [InlineKeyboardButton("📋 REGISTRO DE ACTIVIDAD", callback_data="view:logs"), InlineKeyboardButton("🔄 ACTUALIZAR", callback_data="panel")],
             [InlineKeyboardButton("⚙️ CONFIGURACIÓN", callback_data="view:config")],
         ]
@@ -136,14 +134,7 @@ class TelegramControl:
         level = html.escape(str(acc.get("level", "?")))
         exp = int(acc.get("current_exp", acc.get("exp", 0)) or 0)
         gained = int(acc.get("gained_exp", 0) or 0)
-        points_cfg = self._clan_points_config()
-        clan_points = int(points_cfg.get("accounts", {}).get(uid, acc.get("clan_points", 0)) or 0)
-        target = int(points_cfg.get("target", 4500) or 4500)
-        remaining = max(0, target - clan_points)
-        region = html.escape(str(acc.get("region") or "?"))
-        return (f"• <b>{nick}</b> — UID {html.escape(uid)}\n"
-                f"  Región: {region} | Estado: {status} | Nivel: {level} | EXP: {exp:,} (+{gained:,})\n"
-                f"  🏰 Puntos clan: {clan_points:,}/{target:,} (faltan {remaining:,})")
+        return f"• <b>{nick}</b> — UID {html.escape(uid)}\n  Estado: {status} | Nivel: {level} | EXP: {exp:,} (+{gained:,})"
 
     async def accounts_text(self, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
         accounts = sorted(bot_state.accounts.values(), key=lambda a: str(a.get("uid", "")))
@@ -152,69 +143,12 @@ class TelegramControl:
         subset = accounts[page * self._page_size:(page + 1) * self._page_size]
         text = f"👥 <b>CUENTAS</b> — página {page + 1}/{total_pages}\n\n"
         text += "\n\n".join(self.safe_account(a) for a in subset) if subset else "No hay cuentas cargadas."
-        rows = []
-        for acc in subset:
-            uid = str(acc.get("uid", "")).strip()
-            if uid:
-                rows.append([InlineKeyboardButton(f"🔑 Renovar UID {uid[:18]}", callback_data=f"token:refresh:{uid}")])
         nav = []
         if page > 0: nav.append(InlineKeyboardButton("◀️", callback_data=f"view:accounts:{page-1}"))
         nav.append(InlineKeyboardButton("🔄", callback_data=f"view:accounts:{page}"))
         if page + 1 < total_pages: nav.append(InlineKeyboardButton("▶️", callback_data=f"view:accounts:{page+1}"))
         nav.append(InlineKeyboardButton("⬅️ Panel", callback_data="panel"))
-        rows.append([InlineKeyboardButton("➕ AGREGAR CUENTA", callback_data="accounts:add")])
-        rows.append(nav)
-        return text, InlineKeyboardMarkup(rows)
-
-    async def refresh_account_token(self, uid: str) -> str:
-        uid = str(uid).strip()
-        ad = bot_state.account_credentials.get(uid)
-        if not isinstance(ad, dict):
-            return f"UID {uid}: no encuentro credenciales guardadas. Reimporta la cuenta con UID y contraseña."
-        auth_uid = str(ad.get("auth_uid") or "").strip()
-        auth_password = str(ad.get("auth_password") or "").strip()
-        if not (auth_uid and auth_password):
-            return f"UID {uid}: esta cuenta solo tiene un token. Si ya venció, no se puede regenerar desde ese mismo token; importa un token nuevo o las credenciales UID/contraseña."
-        relogin = getattr(bot_state, "relogin_account", None)
-        if not relogin:
-            return f"UID {uid}: el servicio de reautenticación no está disponible."
-        try:
-            fresh = await relogin(uid, ad)
-            if not fresh:
-                return f"UID {uid}: Garena no entregó credenciales nuevas. Revisa el registro de actividad."
-            worker = bot_state.account_workers.get(auth_uid)
-            if worker and not worker.done():
-                worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
-            cb = bot_state.refresh_callbacks.get("on_account_added")
-            if bot_state.glory_started and cb:
-                await cb({"uid": auth_uid, "password": auth_password})
-            return f"UID {uid}: token renovado correctamente" + (" y worker reiniciado." if bot_state.glory_started else ". Pulsa INICIAR GLORY para reanudar.")
-        except Exception as exc:
-            return f"UID {uid}: error al renovar: {html.escape(str(exc)[:180])}"
-
-    async def refresh_all_tokens(self) -> str:
-        eligible = []
-        seen = set()
-        for ad in list(bot_state.account_credentials.values()):
-            if not isinstance(ad, dict):
-                continue
-            uid = str(ad.get("account_id") or ad.get("auth_uid") or "").strip()
-            if uid and uid not in seen and ad.get("auth_uid") and ad.get("auth_password"):
-                eligible.append(uid); seen.add(uid)
-        if not eligible:
-            return "No hay cuentas con UID y contraseña guardados. Los tokens solos no se pueden renovar después de vencer."
-        ok = failed = 0
-        details = []
-        for uid in eligible:
-            result = await self.refresh_account_token(uid)
-            if "token renovado correctamente" in result:
-                ok += 1
-            else:
-                failed += 1
-            details.append(result)
-            await asyncio.sleep(0.8)
-        return f"Renovación terminada: {ok} correcta(s), {failed} fallida(s), de {len(eligible)} cuenta(s).\n\n" + "\n".join(details[:25])
+        return text, InlineKeyboardMarkup([nav])
 
     async def stats_text(self) -> str:
         accounts = list(bot_state.accounts.values())
@@ -246,21 +180,45 @@ class TelegramControl:
     async def wizard_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await self.reject_or_continue(update): return
         uid = update.effective_user.id; state = self.wizards.get(uid)
+        if not state or state.get("step") not in {"guild", "guild_existing"}: return
         value = (update.effective_message.text or "").strip()
-        if uid in self.pending_account_import:
-            self.pending_account_import.discard(uid)
-            await self._import_manual_account(update, value)
-            return
-        if not state or state.get("step") != "guild": return
         if not value.isdigit():
             await update.effective_message.reply_text("El ID del clan debe contener solo números.", reply_markup=ForceReply(selective=True)); return
-        state.update({"guild_id": value, "step": "region"})
+        state.update({"guild_id": value, "step": "region", "mode": "existing" if state.get("step") == "guild_existing" else "generate"})
         await update.effective_message.reply_text("🌍 Selecciona la región del clan:", reply_markup=self.region_keyboard())
 
     async def wizard_region(self, query, region: str):
         state = self.wizards.setdefault(query.from_user.id, {})
         state.update({"region": region, "step": "count"})
+        if state.get("mode") == "existing":
+            state["step"] = "confirm_existing"
+            await query.edit_message_text(
+                f"✅ <b>CONFIRMAR CUENTAS EXISTENTES</b>\n\nClan: {html.escape(str(state.get('guild_id')))}\nRegión: {html.escape(region)}\n\nSe usarán únicamente cuentas guardadas con token oficial. No se generarán cuentas ni se recreará el token.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🎟️ ENVIAR AL CLAN Y JUGAR", callback_data="existing:run"), InlineKeyboardButton("❌ Cancelar", callback_data="panel")]])
+            )
+            return
         await query.edit_message_text(f"Región seleccionada: {region}\n\n¿Cuántas cuentas deseas crear?", reply_markup=self.count_keyboard())
+
+    async def existing_start(self, update: Update):
+        uid = update.effective_user.id
+        self.wizards[uid] = {"step": "guild_existing", "mode": "existing"}
+        await update.callback_query.edit_message_text(
+            "🎟️ <b>CUENTAS EXISTENTES + CLAN + JUGAR</b>\n\nEscribe el ID numérico del clan. Solo se usarán cuentas con token oficial guardado; no se recrearán tokens.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancelar", callback_data="panel")]])
+        )
+
+    async def existing_run(self, query):
+        state = self.wizards.get(query.from_user.id, {})
+        if bot_state.automation.get("running"):
+            await query.edit_message_text("Ya hay una automatización en curso.", reply_markup=self.panel()); return
+        if not state.get("guild_id") or not state.get("region"):
+            await query.edit_message_text("Falta configurar el clan.", reply_markup=self.panel()); return
+        from dashboard_server import _run_existing_accounts_to_guild
+        bot_state.automation_task = asyncio.create_task(_run_existing_accounts_to_guild(state["guild_id"], state["region"]))
+        self.wizards.pop(query.from_user.id, None)
+        await query.edit_message_text("🎟️ Proceso iniciado. Se usarán los tokens oficiales guardados. Usa PROGRESO para consultar.", reply_markup=self.panel())
 
     async def wizard_count(self, query, count: int):
         state = self.wizards.setdefault(query.from_user.id, {})
@@ -327,6 +285,8 @@ class TelegramControl:
         if data == "glory:start": return await query.edit_message_text(await self.start_glory(update), reply_markup=self.panel())
         if data == "wizard:start":
             return await self.wizard_start(update)
+        if data == "existing:start":
+            return await self.existing_start(update)
         if data == "wiz:askguild":
             self.wizards[query.from_user.id] = {"step": "guild"}
             await query.edit_message_text("Escribe ahora el ID numérico del clan:")
@@ -339,25 +299,8 @@ class TelegramControl:
             return await self.wizard_threads(query, int(data.split(":", 2)[2]))
         if data == "wiz:run":
             return await self.wizard_run(query)
-        if data == "token:refresh:all":
-            await query.edit_message_text("🔄 Renovando las cuentas que tienen UID y contraseña guardados. Esto puede tardar...", parse_mode=ParseMode.HTML)
-            result = await self.refresh_all_tokens()
-            return await query.message.reply_text(result[:3900], reply_markup=self.panel())
-        if data.startswith("token:refresh:"):
-            uid = data.split(":", 2)[2]
-            await query.edit_message_text(f"🔄 Renovando credenciales de UID {html.escape(uid)}...")
-            result = await self.refresh_account_token(uid)
-            return await query.message.reply_text(result[:3900], reply_markup=self.panel())
-        if data == "accounts:add":
-            self.pending_account_import.add(query.from_user.id)
-            return await query.edit_message_text(
-                "➕ <b>AGREGAR CUENTA</b>\n\n"
-                "Puedes adjuntar el archivo .dat/.json de la cuenta o escribir los datos en un mensaje.\n\n"
-                "Formato manual: <code>UID:CONTRASEÑA</code>\n"
-                "Para una cuenta con token: <code>TOKEN:tu_token</code>\n\n"
-                "Al recibirla, el bot validará el acceso y mostrará nombre, UID, nivel y región.",
-                parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Panel", callback_data="panel")]])
-            )
+        if data == "existing:run":
+            return await self.existing_run(query)
         if data == "data:export":
             return await self.export_accounts(update)
         if data == "data:import":
@@ -417,60 +360,6 @@ class TelegramControl:
             json.dump(value, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
 
-    def _clan_points_config(self) -> dict:
-        data = self._read_data("clan_points.json", {"target": 4500, "accounts": {}})
-        if not isinstance(data, dict):
-            data = {"target": 4500, "accounts": {}}
-        data.setdefault("target", 4500)
-        data.setdefault("accounts", {})
-        return data
-
-    def _save_clan_points_config(self, data: dict) -> None:
-        self._write_data_atomic("clan_points.json", data)
-
-    async def command_clan_target(self, update, context):
-        if not await self.reject_or_continue(update): return
-        if not context.args or not context.args[0].isdigit():
-            cfg = self._clan_points_config()
-            await update.effective_message.reply_text(
-                f"Meta actual de puntos del clan: {int(cfg.get('target', 4500)):,}.\n"
-                "Para cambiarla: /meta_clan 4500")
-            return
-        target = int(context.args[0])
-        if not 1 <= target <= 10_000_000:
-            await update.effective_message.reply_text("La meta debe estar entre 1 y 10,000,000.")
-            return
-        cfg = self._clan_points_config(); cfg["target"] = target
-        self._save_clan_points_config(cfg)
-        await update.effective_message.reply_text(f"Meta individual guardada: {target:,} puntos de clan. La EXP/nivel sigue siendo independiente.")
-
-    async def command_clan_points(self, update, context):
-        if not await self.reject_or_continue(update): return
-        cfg = self._clan_points_config(); target = int(cfg.get("target", 4500))
-        if len(context.args) >= 2 and context.args[1].isdigit():
-            uid = str(context.args[0]).strip(); points = int(context.args[1])
-            if not uid.isdigit() or not 0 <= points <= 100_000_000:
-                await update.effective_message.reply_text("Uso: /puntos UID CANTIDAD (puntos acumulados de clan).")
-                return
-            cfg.setdefault("accounts", {})[uid] = points
-            self._save_clan_points_config(cfg)
-            if uid in bot_state.accounts:
-                bot_state.accounts[uid]["clan_points"] = points
-            remaining = max(0, target - points)
-            status = "Meta alcanzada" if points >= target else f"Faltan {remaining:,}"
-            await update.effective_message.reply_text(f"UID {uid}: {points:,}/{target:,} puntos de clan. {status}.\nEste registro no modifica la EXP ni desconecta la cuenta.")
-            return
-        if context.args:
-            await update.effective_message.reply_text("Uso: /puntos para ver el resumen o /puntos UID CANTIDAD para registrar puntos.")
-            return
-        rows = []
-        for uid, acc in sorted(bot_state.accounts.items()):
-            points = int(cfg.get("accounts", {}).get(uid, acc.get("clan_points", 0)) or 0)
-            rows.append(f"• {html.escape(str(acc.get('nickname') or uid))} ({uid}): {points:,}/{target:,}")
-        await update.effective_message.reply_text(
-            f"🏰 PUNTOS DEL CLAN — META {target:,}\n\n" + ("\n".join(rows) if rows else "No hay cuentas cargadas.") +
-            "\n\nEXP/nivel se controla por separado. Los puntos se registran manualmente.")
-
     async def export_accounts(self, update: Update):
         if not await self.reject_or_continue(update): return
         bundle = {
@@ -481,7 +370,6 @@ class TelegramControl:
             "devices": self._read_data("devices.json", {}),
             "guild_config": self._read_data("guild_config.json", bot_state.guild_config or {}),
             "banned_accounts": self._read_data("banned_accounts.json", {}),
-            "clan_points": self._clan_points_config(),
             # Estado visible para conservar nombres, niveles, EXP y orden de escuadra.
             "account_state": list(bot_state.accounts.values()),
         }
@@ -492,137 +380,91 @@ class TelegramControl:
             caption="Respaldo completo de Ajay Glory. Contiene credenciales y tokens: guárdalo de forma privada."
         )
 
-    def _extract_account_rows(self, data):
-        """Acepta backups Ajay, guest_account_info .dat y credenciales simples."""
-        if isinstance(data, dict) and isinstance(data.get("guest_account_info"), dict):
-            info = data["guest_account_info"]
-            uid = info.get("com.garena.msdk.guest_uid") or info.get("uid")
-            password = info.get("com.garena.msdk.guest_password") or info.get("password")
-            return ([{"uid": str(uid), "password": str(password)}] if uid and password else [])
-        if isinstance(data, dict) and (data.get("uid") or data.get("token") or data.get("access_token")):
-            row = dict(data)
-            if row.get("access_token") and not row.get("token"): row["token"] = row["access_token"]
-            return [row]
-        if isinstance(data, list):
-            return [dict(x) for x in data if isinstance(x, dict)]
-        if isinstance(data, dict) and isinstance(data.get("accounts"), list):
-            return [dict(x) for x in data["accounts"] if isinstance(x, dict)]
-        return []
-
-    async def _validate_and_store_account(self, row):
-        """Importa credenciales al almacenamiento local sin exigir login previo."""
-        row = dict(row)
-        uid = str(row.get("uid") or row.get("guest_uid") or "").strip()
-        password = str(row.get("password") or row.get("guest_password") or "").strip()
-        token = str(row.get("token") or row.get("access_token") or "").strip()
-        if not ((uid and password) or token):
-            raise ValueError("El archivo no contiene UID+contraseña ni token.")
-
-        saved = {}
-        if uid and password:
-            saved.update({"uid": uid, "password": password})
-            account_key = uid
-        else:
-            saved["token"] = token
-            account_key = str(row.get("uid") or row.get("guest_uid") or "").strip()
-            if account_key:
-                saved["uid"] = account_key
-            else:
-                account_key = "token:" + token[:24]
-
-        nickname = str(row.get("nickname") or row.get("name") or "").strip()
-        region = str(row.get("region") or "").strip().upper()
-        level_value = row.get("level")
-        level = int(level_value) if str(level_value or "").isdigit() else None
-        saved.update({
-            "nickname": nickname or "Pendiente de consultar",
-            "region": region or "?",
-            "level": level,
-            "profile_pending": not bool(nickname and region and level is not None),
-        })
-
-        current = self._read_data("accounts.json", [])
-        if not isinstance(current, list):
-            current = []
-        index = next((i for i, item in enumerate(current)
-                      if isinstance(item, dict) and (
-                          (uid and str(item.get("uid", "")) == uid) or
-                          (token and str(item.get("token", "")) == token)
-                      )), None)
-        if index is None:
-            current.append(saved)
-            status = "nueva"
-        else:
-            current[index].update(saved)
-            status = "actualizada"
-        self._write_data_atomic("accounts.json", current)
-        return status, saved
-
-    async def _import_manual_account(self, update: Update, value: str):
-        try:
-            if value.upper().startswith("TOKEN:"):
-                row = {"token": value.split(":", 1)[1].strip()}
-            elif ":" in value:
-                uid, password = value.split(":", 1)
-                row = {"uid": uid.strip(), "password": password.strip()}
-            else:
-                raise ValueError("Formato incorrecto. Usa UID:CONTRASEÑA o TOKEN:token.")
-            status, acc = await self._validate_and_store_account(row)
-            await update.effective_message.reply_text(
-                f"<b>CUENTA {status.upper()}</b>\nNombre: {html.escape(str(acc['nickname']))}\n"
-                f"ID: <code>{html.escape(str(acc['uid']))}</code>\nNivel: {acc['level']}\nRegión: {html.escape(str(acc['region']))}",
-                parse_mode=ParseMode.HTML, reply_markup=self.panel())
-        except Exception as exc:
-            await update.effective_message.reply_text(f"No se pudo agregar la cuenta: {html.escape(str(exc))}", parse_mode=ParseMode.HTML, reply_markup=self.panel())
-
     async def import_accounts(self, update: Update):
         if not await self.reject_or_continue(update): return
         document = update.effective_message.document
         if not document:
-            await update.effective_message.reply_text("Adjunta un archivo .dat/.json de cuenta o un respaldo JSON.")
+            await update.effective_message.reply_text("Adjunta el JSON exportado por el botón EXPORTAR CUENTAS o un archivo .dat de Garena.")
             return
         if document.file_size and document.file_size > 15 * 1024 * 1024:
-            await update.effective_message.reply_text("El archivo supera el límite de 15 MB."); return
+            await update.effective_message.reply_text("El archivo supera el límite de 15 MB.")
+            return
         try:
             remote = await document.get_file()
             raw = bytes(await remote.download_as_bytearray())
-            try:
-                data = json.loads(raw.decode("utf-8-sig"))
-            except Exception:
-                # Algunos archivos .dat pueden traer JSON precedido por BOM/espacios; no se aceptan binarios opacos.
-                raise ValueError("No pude leer el archivo. Envíame el .dat o .json original de la cuenta.")
-            rows = self._extract_account_rows(data)
-            if rows:
-                # Backups completos conservan su ruta de restauración anterior.
-                if isinstance(data, dict) and isinstance(data.get("accounts"), list) and data.get("format") == "ajay-glory-backup-v1":
-                    await self._import_backup_bundle(update, data)
-                    return
-                results = []
-                for row in rows:
-                    try:
-                        status, acc = await self._validate_and_store_account(row)
-                        results.append(f"✅ {html.escape(str(acc.get('nickname') or 'Pendiente de consultar'))} | ID {html.escape(str(acc.get('uid') or 'pendiente'))} | Nivel {html.escape(str(acc.get('level') or 'pendiente'))} | Región {html.escape(str(acc.get('region') or 'pendiente'))} ({status}; guardada)")
-                    except Exception as exc:
-                        results.append(f"❌ {html.escape(str(exc))}")
-                await update.effective_message.reply_text("<b>RESULTADO DE IMPORTACIÓN</b>\n\n" + "\n".join(results), parse_mode=ParseMode.HTML, reply_markup=self.panel())
-                return
-            raise ValueError("El archivo no contiene una cuenta reconocible. Se acepta guest_account_info, UID+contraseña o token.")
+            data = json.loads(raw.decode("utf-8"))
+            is_dat = str(document.file_name or "").lower().endswith(".dat")
+            if is_dat and isinstance(data, dict):
+                guest = data.get("guest_account_info") or {}
+                uid = str(guest.get("com.garena.msdk.guest_uid") or "").strip()
+                password = str(guest.get("com.garena.msdk.guest_password") or "").strip()
+                if not uid or not password:
+                    raise ValueError("El DAT no contiene guest_uid y guest_password válidos")
+                data = [{"uid": uid, "password": password, "auth_type": "dat", "source_file": document.file_name}]
+            if isinstance(data, list):
+                bundle = {"accounts": data}
+            elif isinstance(data, dict) and isinstance(data.get("accounts"), list):
+                bundle = data
+            else:
+                raise ValueError("Formato de respaldo no reconocido")
+            incoming = []
+            for row in bundle.get("accounts", []):
+                if not isinstance(row, dict): continue
+                row = dict(row)
+                if row.get("auth_type") == "dat" and row.get("uid") and row.get("password"):
+                    row["uid"] = str(row["uid"]).strip(); row["password"] = str(row["password"]); incoming.append(row)
+                elif row.get("uid") and row.get("password"):
+                    row["uid"] = str(row["uid"]).strip(); incoming.append(row)
+                elif row.get("token"):
+                    row["token"] = str(row["token"]).strip(); incoming.append(row)
+            if not incoming:
+                raise ValueError("El respaldo no contiene cuentas válidas")
+            current = self._read_data("accounts.json", [])
+            merged = []
+            index = {}
+            def key(row):
+                return "uid:" + str(row.get("uid")) if row.get("uid") else "token:" + str(row.get("token"))
+            for row in current:
+                if isinstance(row, dict): index[key(row)] = len(merged); merged.append(row)
+            updated = 0; added = 0
+            for row in incoming:
+                k = key(row)
+                if k in index:
+                    if row.get("auth_type") == "dat":
+                        # Un DAT es inmutable: no sustituir token ni credenciales existentes.
+                        updated += 0
+                    else:
+                        merged[index[k]].update(row); updated += 1
+                else:
+                    index[k] = len(merged); merged.append(row); added += 1
+            self._write_data_atomic("accounts.json", merged)
+            for name in ("token_cache", "devices"):
+                if isinstance(bundle.get(name), dict):
+                    existing = self._read_data(name + ".json", {})
+                    if not isinstance(existing, dict): existing = {}
+                    existing.update(bundle[name]); self._write_data_atomic(name + ".json", existing)
+            if isinstance(bundle.get("guild_config"), dict) and bundle["guild_config"].get("guild_id"):
+                bot_state.guild_config = bundle["guild_config"]
+                self._write_data_atomic("guild_config.json", bot_state.guild_config)
+            if isinstance(bundle.get("banned_accounts"), dict):
+                self._write_data_atomic("banned_accounts.json", bundle["banned_accounts"])
+            # Si Glory está activo, reiniciar solo las cuentas importadas para que
+            # tomen sus credenciales/cache y vuelvan a entrar en sus escuadras.
+            restarted = 0
+            if bot_state.glory_started:
+                for row in incoming:
+                    cancelled = []
+                    for worker_key, worker in list(bot_state.account_workers.items()):
+                        if (row.get("uid") and str(worker_key) == str(row["uid"])) or (row.get("token") and str(worker_key).startswith(str(row["token"])[:10])):
+                            worker.cancel(); cancelled.append(worker); bot_state.account_workers.pop(worker_key, None)
+                    if cancelled:
+                        await asyncio.gather(*cancelled, return_exceptions=True)
+                    cb = bot_state.refresh_callbacks.get("on_account_added")
+                    if cb:
+                        await cb(row); restarted += 1
+            await update.effective_message.reply_text(f"Importación completada. Nuevas: {added}, actualizadas: {updated}, workers reiniciados: {restarted}. El orden importado se conserva para reconstruir las escuadras.")
         except Exception as exc:
-            await update.effective_message.reply_text(f"No se pudo importar: {html.escape(str(exc))}", parse_mode=ParseMode.HTML, reply_markup=self.panel())
-
-    async def _import_backup_bundle(self, update: Update, bundle: dict):
-        incoming = self._extract_account_rows(bundle)
-        if not incoming: raise ValueError("El respaldo no contiene cuentas.")
-        # Restaurar los datos auxiliares y validar cada credencial individualmente.
-        imported = 0; failed = 0
-        for row in incoming:
-            try: await self._validate_and_store_account(row); imported += 1
-            except Exception: failed += 1
-        for name in ("token_cache", "devices", "guild_config", "banned_accounts"):
-            if isinstance(bundle.get(name), dict):
-                self._write_data_atomic(name + ".json", bundle[name])
-        if isinstance(bundle.get("clan_points"), dict): self._save_clan_points_config(bundle["clan_points"])
-        await update.effective_message.reply_text(f"Respaldo procesado. Cuentas guardadas: {imported}; fallidas: {failed}.", reply_markup=self.panel())
+            await update.effective_message.reply_text(f"No se pudo importar el respaldo: {exc}")
 
     async def command_delete(self, update, context):
         if not await self.reject_or_continue(update): return
@@ -676,7 +518,7 @@ class TelegramControl:
         await update.effective_message.reply_text(f"Gremio guardado: {guild_id} ({region}).")
 
     async def help_command(self, update, context):
-        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /exportar /importar /meta_clan PUNTOS /puntos [UID PUNTOS] /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
+        if await self.reject_or_continue(update): await update.effective_message.reply_text("/start /status /iniciar /detener /cuentas /stats /logs /generar CANTIDAD HILOS ID_CLAN REGION /exportar /importar /eliminar UID /gremio ID REGION /ayuda\n/id solo muestra tu ID y no concede acceso.")
 
     async def notify(self, message: str, level: str = "info"):
         if not self.application or not _admin_ids(): return
@@ -706,8 +548,6 @@ class TelegramControl:
         self.application.add_handler(CommandHandler("generar", self.command_generate))
         self.application.add_handler(CommandHandler("exportar", self.export_accounts))
         self.application.add_handler(CommandHandler("importar", self.import_accounts))
-        self.application.add_handler(CommandHandler("meta_clan", self.command_clan_target))
-        self.application.add_handler(CommandHandler("puntos", self.command_clan_points))
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.wizard_text))
         self.application.add_handler(MessageHandler(filters.Document.ALL, self.import_accounts))
         self.application.add_handler(CommandHandler("gremio", self.command_guild))

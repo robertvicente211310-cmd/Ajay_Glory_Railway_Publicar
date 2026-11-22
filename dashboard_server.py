@@ -754,9 +754,17 @@ async def _load_accounts_for_join():
         if not isinstance(data, list):
             return []
         return [
-            {"uid": str(a.get("uid", "")).strip(), "password": str(a.get("password", "")).strip()}
+            {
+                "uid": str(a.get("uid", "")).strip(),
+                "password": str(a.get("password", "")).strip(),
+                "token": str(a.get("token") or a.get("game_token") or "").strip(),
+                "server_url": str(a.get("server_url") or "").strip(),
+                "release_version": str(a.get("release_version") or "").strip(),
+                "region": str(a.get("region") or "").strip().upper(),
+                "auth_type": str(a.get("auth_type") or "").strip().lower(),
+            }
             for a in data
-            if str(a.get("uid", "")).strip() and str(a.get("password", "")).strip()
+            if isinstance(a, dict) and (str(a.get("uid", "")).strip() or str(a.get("token") or a.get("game_token") or "").strip())
         ]
     except Exception:
         return []
@@ -852,9 +860,16 @@ async def _run_automation(guild_id: str, region: str, total: int, threads: int, 
         for account in accounts:
             uid = account["uid"]
             try:
-                http_status, result = await _send_external_join(guild_id, uid, account["password"], region)
-                success = bool(isinstance(result, dict) and result.get("success") is True)
-                message = result.get("message", "") if isinstance(result, dict) else ""
+                join_callback = bot_state.refresh_callbacks.get("join_clan")
+                if join_callback:
+                    success, message = await join_callback(account, guild_id, region)
+                    http_status = 200 if success else None
+                    result = {"success": bool(success), "message": str(message)}
+                else:
+                    # Compatibilidad si dashboard_server se ejecuta sin app.py.
+                    http_status, result = await _send_external_join(guild_id, uid, account["password"], region)
+                    success = bool(isinstance(result, dict) and result.get("success") is True)
+                    message = result.get("message", "") if isinstance(result, dict) else ""
                 label = "Join Request Sended" if success else "Join Request Failed"
                 bot_state.log(f"UID {uid}: {label}" + (f" | {message}" if message else ""), "success" if success else "error", uid)
                 join_results.append({"uid": uid, "success": success, "status": label, "http_status": http_status, "response": result})
@@ -881,6 +896,52 @@ async def _run_automation(guild_id: str, region: str, total: int, threads: int, 
         bot_state.log(f"Automation failed: {e}", "error")
 
 
+async def _run_existing_accounts_to_guild(guild_id: str, region: str):
+    """Join saved token accounts to a guild, then start the normal workers."""
+    region = _canonical_guild_region(guild_id, region)
+    bot_state.automation.update({
+        "running": True, "stage": "joining_existing", "target": 0,
+        "created": 0, "joined": 0, "failed": 0,
+        "message": "Using saved official game tokens…", "started_at": time.time()
+    })
+    try:
+        accounts = await _load_accounts_for_join()
+        playable_accounts = [a for a in accounts if a.get("token") or (a.get("auth_type") == "dat" and a.get("uid") and a.get("password"))]
+        bot_state.automation["target"] = len(playable_accounts)
+        if not playable_accounts:
+            raise RuntimeError("No saved official-token or DAT accounts found")
+        for account in playable_accounts:
+            uid = account.get("uid") or f"token_{account['token'][:8]}"
+            try:
+                callback_name = "join_clan_dat" if account.get("auth_type") == "dat" else "join_clan_token"
+                join_callback = bot_state.refresh_callbacks.get(callback_name)
+                if not join_callback:
+                    raise RuntimeError(f"{callback_name} callback is not ready")
+                success, message = await join_callback(account, guild_id, region)
+                bot_state.log(f"UID {uid}: {'Join Request Sended' if success else 'Join Request Failed'} | {message}", "success" if success else "error", uid)
+                if success:
+                    bot_state.automation["joined"] += 1
+                else:
+                    bot_state.automation["failed"] += 1
+            except Exception as exc:
+                bot_state.automation["failed"] += 1
+                bot_state.log(f"UID {uid}: Join Request Failed | {exc}", "error", uid)
+
+        bot_state.automation["stage"] = "starting"
+        bot_state.automation["message"] = "Starting AjayXGlory with saved accounts…"
+        callback = bot_state.refresh_callbacks.get("on_glory_start")
+        if not callback:
+            raise RuntimeError("Glory start callback is not ready yet")
+        await callback()
+        bot_state.glory_started = True
+        bot_state.setup_complete = True
+        bot_state.automation.update({"running": False, "stage": "done", "message": "Official tokens → Join → Glory complete"})
+        bot_state.log(f"Existing-token guild flow complete | {len(token_accounts)} account(s)", "success")
+    except Exception as exc:
+        bot_state.automation.update({"running": False, "stage": "error", "message": str(exc)})
+        bot_state.log(f"Existing-token automation failed: {exc}", "error")
+
+
 async def handle_api_start(request: web.Request) -> web.Response:
     try:
         body = await request.json()
@@ -900,6 +961,22 @@ async def handle_api_start(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "error": "Guild ID is required"}, status=400)
     bot_state.automation_task = asyncio.create_task(_run_automation(guild_id, region, total, threads, fresh_pool))
     return web.json_response({"status": "started", "automation": bot_state.automation})
+
+
+async def handle_api_existing_accounts(request: web.Request) -> web.Response:
+    """Send saved official-token accounts to the selected guild and play."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if bot_state.automation.get("running"):
+        return web.json_response({"status": "busy", "automation": bot_state.automation}, status=409)
+    guild_id = str(body.get("guild_id", "")).strip()
+    region = _canonical_guild_region(guild_id, str(body.get("region", "IND")))
+    if not guild_id:
+        return web.json_response({"status": "error", "error": "Guild ID is required"}, status=400)
+    bot_state.automation_task = asyncio.create_task(_run_existing_accounts_to_guild(guild_id, region))
+    return web.json_response({"status": "started", "message": "Saved official-token accounts flow started"})
 
 
 async def handle_api_automation(request: web.Request) -> web.Response:
@@ -1446,6 +1523,7 @@ async def start_web_dashboard(host: str = "0.0.0.0", port: int = 5000):
     app.router.add_get("/", handle_index)
     app.router.add_post("/api/setup", handle_api_setup)
     app.router.add_post("/api/start", handle_api_start)
+    app.router.add_post("/api/existing-accounts", handle_api_existing_accounts)
     app.router.add_get("/api/automation", handle_api_automation)
     app.router.add_get("/api/guild-config", handle_api_guild_config)
     app.router.add_post("/api/clanjoin", handle_api_setup)

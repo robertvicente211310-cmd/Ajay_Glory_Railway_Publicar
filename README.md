@@ -53,32 +53,12 @@ Se verificó la compilación sintáctica con `python3 -m compileall`. No se afir
 
 El botón **GENERAR + CLAN + JUGAR** muestra el formato del comando. Ejemplo: `/generar 4 2 2068400598 NA`. El flujo reutiliza `gen.py` y `dashboard_server._run_automation`: genera las cuentas, consulta la información del clan, envía las solicitudes de unión y finalmente llama al callback original `on_glory_start`. El botón **PROGRESO** muestra la etapa, cuentas creadas, unidas y fallidas.
 
+El botón separado **CUENTAS EXISTENTES (TOKEN OFICIAL) → CLAN + JUGAR** no genera cuentas y no llama al login por UID/contraseña para unirlas. Lee las entradas de `accounts.json` que ya tengan `token` o `game_token`, usa ese token oficial directamente en `RequestJoinClan` y después arranca Glory con el flujo normal. Las cuentas sin token oficial guardado se omiten; primero deben agregarse/importarse con su token.
+
+También se pueden importar archivos `.dat` de Garena con el formato `guest_account_info`. Se guardan como `auth_type: "dat"` junto con su `guest_uid` y `guest_password`, sin convertirlos en cuentas normales ni sobrescribir sus credenciales. El modo DAT inicializa la sesión una sola vez en memoria y luego reutiliza esa sesión para jugar; no ejecuta el mecanismo periódico de re-login ni escribe un token nuevo en `accounts.json`.
+
 ## Exportar e importar cuentas desde Telegram
 
 En el panel usa **📤 EXPORTAR CUENTAS** para recibir un respaldo JSON privado. También puedes usar `/exportar`. El archivo incluye las cuentas persistentes, caché de tokens, dispositivos, configuración del clan, cuentas bloqueadas y estado visible. Los tokens y contraseñas son secretos: no compartas el archivo ni lo subas a GitHub.
 
 Para restaurar, pulsa **📥 IMPORTAR CUENTAS**, adjunta el JSON exportado o usa `/importar` y después adjunta el archivo. La importación fusiona por UID/token, no borra las cuentas existentes y conserva el orden del respaldo. Si Glory está activo, las cuentas importadas se reinician con el motor original y vuelven a organizarse en escuadras automáticamente.
-
-## Seguimiento separado de puntos del clan
-
-- `/meta_clan 4500` establece la meta que se muestra para cada cuenta (se guarda en `clan_points.json`).
-- `/puntos` muestra el registro individual.
-- `/puntos UID CANTIDAD` registra/actualiza manualmente los puntos del clan de esa cuenta.
-- Los puntos del clan son independientes de la EXP y del nivel de cuenta. Este registro es manual; no consulta automáticamente los puntos del juego ni desconecta cuentas al alcanzar la meta.
-
-## Importación desde archivos KING BOT
-
-El importador acepta una lista JSON de objetos con `uid` y `password` (como el `accounts.json` de KING BOT), además del respaldo completo de Ajay. Fusiona por UID, conserva las cuentas existentes, evita duplicados, respeta la región guardada en cada cuenta y agrega los registros al pool persistente. Si Glory está activo, solicita al callback del motor que incorpore cada cuenta importada. La exportación entrega un JSON descargable desde Telegram e incluye el registro de puntos del clan.
-
-Nota: este paquete mantiene el motor y las regiones originales de Ajay. No se sustituyó el generador de cuentas por el generador de KING BOT ni se añadió automatización de creación masiva o de partidas para acumular puntos. La gestión/importación/exportación y el registro de progreso quedan separados de ese proceso.
-
-## Renovación de tokens desde Telegram
-
-En el panel hay una acción **RENOVAR TOKENS VENCIDOS** y cada cuenta tiene su propio botón **Renovar UID** en la lista de cuentas. La renovación funciona cuando la cuenta conserva UID y contraseña de invitado; el motor vuelve a autenticarse, guarda las credenciales nuevas y, si Glory está activo, reinicia el worker de esa cuenta. Las cuentas importadas únicamente con un access token no pueden recuperar un token ya vencido a partir del mismo token: se debe importar un token vigente o las credenciales UID/contraseña. La renovación masiva procesa las cuentas una por una y muestra los resultados.
-
-
-## Importación individual de cuentas (Telegram)
-
-El panel incluye el botón **AGREGAR CUENTA**. Acepta archivos JSON `.dat` con `guest_account_info` (UID y contraseña de invitado), JSON con `uid`/`password` o `token`, y respaldos JSON de Ajay Glory. También permite entrada manual con `UID:CONTRASEÑA` o `TOKEN:token`.
-
-Cada cuenta se valida con el motor de autenticación y el bot responde con nombre, UID, nivel y región obtenidos del perfil. Las credenciales se guardan en `accounts.json`; no se muestran en el mensaje de confirmación. Importar una cuenta no la envía automáticamente a un clan ni inicia partidas.

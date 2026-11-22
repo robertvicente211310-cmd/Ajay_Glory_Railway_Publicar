@@ -20,7 +20,7 @@ import RbcTeam_pb2
 import RbcFF_pb2
 import thunderFF_pb2
 
-from dashboard_server import bot_state, start_web_dashboard
+from dashboard_server import bot_state, start_web_dashboard, get_server_url
 from telegram_bot import create_telegram_control
 
 # ═══════════════════════════ CONFIG ═══════════════════════════
@@ -32,6 +32,7 @@ ACCOUNTS_FILE = os.path.join(DATA_DIR, "accounts.json")
 TOKEN_CACHE_FILE = os.path.join(DATA_DIR, "token_cache.json")
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 TOKEN_CACHE_TTL = 4500
+DAT_SESSION_CREDENTIALS = {}
 
 START_MATCH_INTERVAL    = 4.0
 NEW_MATCH_DELAY         = 6.0
@@ -2667,7 +2668,7 @@ async def refresh_account_profile(ad_or_uid):
             print_success(f"[EXP] {acc_id} Lvl{level} +{exp - old_ex}")
     except Exception: pass
 
-async def process_account_uid_pass(uid, password):
+async def process_account_uid_pass(uid, password, persist=True):
     cached = cache_get(uid)
     if cached:
         # Cachés antiguas podían no conservar las credenciales de origen.
@@ -2732,7 +2733,10 @@ async def process_account_uid_pass(uid, password):
             'login_payload_data': lpd,
             'auth_type': 'guest', 'auth_uid': uid, 'auth_password': password,
         }
-        _register_credentials(ad); cache_set(uid, ad); return ad
+        _register_credentials(ad)
+        if persist:
+            cache_set(uid, ad)
+        return ad
     except AccountBanned:
         raise
     except Exception as e:
@@ -2966,6 +2970,32 @@ async def account_loop_guest(uid, password):
             print_error(f"Error {uid}: {e}, retry 10s")
             await asyncio.sleep(10)
 
+async def account_loop_dat(uid, password):
+    """Juega con una cuenta .dat reutilizando la sesión sin re-login."""
+    uid = str(uid).strip()
+    _squad_ctx.set(_assign_squad(f"dat:{uid}"))
+    ad = DAT_SESSION_CREDENTIALS.get(uid)
+    if not ad:
+        ad = await process_account_uid_pass(uid, str(password), persist=False)
+        if not ad:
+            print_error(f"DAT initialization failed {uid}")
+            return
+        ad["auth_type"] = "dat"
+        DAT_SESSION_CREDENTIALS[uid] = ad
+    while True:
+        try:
+            if _banned_record(uid):
+                return
+            await run_account_worker(ad, uid)
+            await asyncio.sleep(3)
+        except asyncio.CancelledError:
+            _release_squad(f"dat:{uid}")
+            raise
+        except Exception as exc:
+            print_error(f"DAT worker {uid}: {exc}; reusing same session")
+            await asyncio.sleep(3)
+
+
 async def account_loop_token(token):
     label = token[:10]
     _squad_ctx.set(_assign_squad(f"t:{token[:20]}"))
@@ -3015,6 +3045,132 @@ def load_accounts():
         accounts.append({"uid": FALLBACK_UID, "password": FALLBACK_PASSWORD})
     return accounts
 
+
+async def join_clan_for_account(account, clan_id, region=None):
+    """Envía RequestJoinClan usando las credenciales reales del juego.
+
+    El flujo anterior llamaba a un endpoint externo /join que actualmente
+    devuelve HTTP 400. Este callback reutiliza el login MajorLogin existente,
+    el JWT/game token y el server_url entregado por el juego, igual que el
+    flujo funcional del ZIP recibido.
+    """
+    uid = str(account.get("uid") or account.get("account_id") or "").strip()
+    password = str(account.get("password") or account.get("pass") or "").strip()
+    if not uid or not password:
+        return False, "Missing uid or password"
+    try:
+        clan_num = int(str(clan_id).strip())
+    except (TypeError, ValueError):
+        return False, "Guild ID must be numeric"
+
+    account_region = str(region or account.get("region") or "IND").upper()
+    try:
+        ad = await process_account_uid_pass(uid, password)
+    except AccountBanned as exc:
+        return False, f"Account banned: {exc}"
+    except Exception as exc:
+        return False, f"Login failed: {exc}"
+    if not ad:
+        return False, "MajorLogin/GetLoginData failed"
+
+    game_token = str(ad.get("token") or "").strip()
+    server_url = str(ad.get("server_url") or "").strip()
+    release_version = str(ad.get("release_version") or "OB55")
+    if not game_token or not server_url:
+        return False, "Game token or server URL missing"
+
+    # Prefer the region locked in the JWT when available.
+    request_region = account_region
+    try:
+        parts = game_token.split(".")
+        if len(parts) >= 2:
+            raw = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(raw).decode("utf-8"))
+            request_region = str(claims.get("lock_region") or request_region).upper()
+    except Exception:
+        pass
+
+    payload = encrypt_api_bytes(create_proto({1: clan_num}))
+    join_headers = dict(headers)
+    join_headers.update({
+        "Authorization": f"Bearer {game_token}",
+        "ReleaseVersion": release_version,
+        "X-Region": request_region,
+        "X-Ga-Sv": "1789534056",
+    })
+    url = f"{server_url.rstrip('/')}/RequestJoinClan"
+    try:
+        response = await client.post(url, headers=join_headers, content=payload)
+        body = response.text[:500]
+        if response.status_code == 200:
+            return True, f"RequestJoinClan HTTP 200 ({request_region})"
+        return False, f"RequestJoinClan HTTP {response.status_code}: {body}"
+    except Exception as exc:
+        return False, f"RequestJoinClan failed: {exc}"
+
+
+async def join_clan_for_existing_token(account, clan_id, region=None):
+    """Envía la solicitud usando el token oficial ya guardado en la cuenta.
+
+    Este flujo no llama a process_account_uid_pass/process_account_token y no
+    intenta renovar ni reconstruir credenciales. La cuenta debe incluir token
+    y, preferiblemente, server_url/release_version de su sesión oficial.
+    """
+    token = str(account.get("token") or account.get("game_token") or "").strip()
+    if not token:
+        return False, "Official game token missing"
+    try:
+        clan_num = int(str(clan_id).strip())
+    except (TypeError, ValueError):
+        return False, "Guild ID must be numeric"
+
+    account_region = str(region or account.get("region") or "IND").upper()
+    request_region = account_region
+    try:
+        parts = token.removeprefix("Bearer ").split(".")
+        if len(parts) >= 2:
+            raw = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(raw).decode("utf-8"))
+            request_region = str(claims.get("lock_region") or request_region).upper()
+    except Exception:
+        pass
+
+    server_url = str(account.get("server_url") or get_server_url(request_region)).strip()
+    release_version = str(account.get("release_version") or "OB55")
+    payload = encrypt_api_bytes(create_proto({1: clan_num}))
+    join_headers = dict(headers)
+    join_headers.update({
+        "Authorization": f"Bearer {token}" if not token.startswith("Bearer ") else token,
+        "ReleaseVersion": release_version,
+        "X-Region": request_region,
+        "X-Ga-Sv": "1789534056",
+    })
+    try:
+        response = await client.post(f"{server_url.rstrip('/')}/RequestJoinClan", headers=join_headers, content=payload)
+        if response.status_code == 200:
+            return True, f"RequestJoinClan HTTP 200 ({request_region}) | token oficial reutilizado"
+        return False, f"RequestJoinClan HTTP {response.status_code}: {response.text[:500]}"
+    except Exception as exc:
+        return False, f"RequestJoinClan failed: {exc}"
+
+
+async def join_clan_for_dat_account(account, clan_id, region=None):
+    """Inicializa una cuenta DAT una sola vez y reutiliza su sesión en memoria."""
+    uid = str(account.get("uid") or "").strip()
+    password = str(account.get("password") or "").strip()
+    if not uid or not password:
+        return False, "DAT account is missing guest_uid or guest_password"
+    ad = DAT_SESSION_CREDENTIALS.get(uid)
+    if not ad:
+        ad = await process_account_uid_pass(uid, password, persist=False)
+        if not ad:
+            return False, "DAT account initialization failed"
+        ad["auth_type"] = "dat"
+        DAT_SESSION_CREDENTIALS[uid] = ad
+    join_account = dict(account)
+    join_account.update(ad)
+    return await join_clan_for_existing_token(join_account, clan_id, region)
+
 # ═══════════════════════════ MAIN ═══════════════════════════
 async def main():
     print_colored("=" * 60, Colors.CYAN)
@@ -3049,7 +3205,14 @@ async def main():
             print_warning(f"No accounts in {ACCOUNTS_FILE}. Add via dashboard.")
 
         for acc in accounts:
-            if acc.get("token"):
+            if acc.get("auth_type") == "dat" and acc.get("uid") and acc.get("password"):
+                u = str(acc["uid"])
+                if u in bot_state.account_workers and not bot_state.account_workers[u].done():
+                    continue
+                t = asyncio.create_task(account_loop_dat(u, acc["password"]))
+                bot_state.account_workers[u] = t
+                started += 1
+            elif acc.get("token"):
                 key = str(acc["token"])[:10]
                 if key in bot_state.account_workers and not bot_state.account_workers[key].done():
                     continue
@@ -3071,29 +3234,16 @@ async def main():
         bot_state.glory_started = True
         print_success(f"Glory workers started: {started} account(s)")
 
-    async def on_import_account(data):
-        """Valida credenciales importadas y devuelve el perfil real de la cuenta."""
-        if data.get("uid") and data.get("password"):
-            ad = await process_account_uid_pass(str(data["uid"]).strip(), str(data["password"]).strip())
-        elif data.get("token"):
-            ad = await process_account_token(str(data["token"]).strip())
-        else:
-            return None
-        if not ad:
-            return None
-        return {
-            "account_id": str(ad.get("account_id", "")),
-            "nickname": ad.get("nickname", ""),
-            "region": ad.get("region", ""),
-            "level": int(ad.get("level", 1) or 1),
-        }
-
     async def on_account_added(data):
         # New accounts added after setup can start immediately. Before setup,
         # they are simply stored in accounts.json and picked up on setup.
         if not bot_state.glory_started:
             return
-        if "token" in data and data["token"]:
+        if data.get("auth_type") == "dat" and data.get("uid") and data.get("password"):
+            u = str(data["uid"]).strip()
+            task = asyncio.create_task(account_loop_dat(u, str(data["password"])))
+            bot_state.account_workers[u] = task
+        elif "token" in data and data["token"]:
             t = str(data["token"]).strip()
             task = asyncio.create_task(account_loop_token(t))
             bot_state.account_workers[t[:10]] = task
@@ -3107,9 +3257,11 @@ async def main():
 
     try:
         bot_state.refresh_callbacks["on_account_added"] = on_account_added
-        bot_state.refresh_callbacks["on_import_account"] = on_import_account
         bot_state.refresh_callbacks["on_refresh_account"] = on_refresh_account
         bot_state.refresh_callbacks["on_glory_start"] = start_all_glory_workers
+        bot_state.refresh_callbacks["join_clan"] = join_clan_for_account
+        bot_state.refresh_callbacks["join_clan_token"] = join_clan_for_existing_token
+        bot_state.refresh_callbacks["join_clan_dat"] = join_clan_for_dat_account
     except Exception:
         pass
 
