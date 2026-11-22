@@ -44,7 +44,7 @@ MAX_CONSECUTIVE_PARSE_FAILURES = 5
 NON_MATCH_RECONNECT_DELAY      = 1.0
 
 # ⭐ Only Clash Squad
-BR_MODE_ID             = 2
+BR_MODE_ID             = 1
 BR_MAP_ID              = 1
 
 ANTI_AFK_MIN_INTERVAL  = 1.8
@@ -1013,7 +1013,8 @@ async def send_majorlogin(data, release_version, server_url):
         if r.status_code != 200:
             print_error(f"[MAJORLOGIN] HTTP {r.status_code}"); return None
         c = r.content
-        if len(c) < 40: return None
+        if len(c) < 40:
+            print_error(f"[MAJORLOGIN] respuesta corta: {len(c)}B hex={c.hex()[:80]}"); return None
         for off in [0, 64] + list(range(128)):
             try:
                 m = thunderFF_pb2.MajorLoginRes(); m.ParseFromString(c[off:])
@@ -1021,6 +1022,7 @@ async def send_majorlogin(data, release_version, server_url):
             except Exception: continue
         ban = _detect_ban(c)            # token hi nahi mila - kya account banned hai?
         if ban: return _BanResult(ban)
+        print_error(f"[MAJORLOGIN] sin token en respuesta: {len(c)}B ver={release_version} hex={c.hex()[:120]}")
         return None
     except Exception as e:
         print_error(f"[MAJORLOGIN] {e}"); return None
@@ -1079,12 +1081,17 @@ async def send_ping(account_id, token, release_version):
         return r.status_code == 200
     except Exception: return False
 
-async def ping_worker(account_id, token, release_version, region="ID"):
+async def ping_worker(account_id, token, release_version, region="ID", token_provider=None):
     if not ENABLE_HTTP_PING: return
     uid_str = str(account_id); ok_count = 0; fails = 0
     try:
         await asyncio.sleep(5.0 + random.uniform(0, 2.0))
         while True:
+            if token_provider:
+                try:
+                    _t = token_provider()
+                    if _t: token = _t
+                except Exception: pass
             ok = await send_ping(uid_str, token, release_version)
             if ok:
                 ok_count += 1; fails = 0
@@ -2564,7 +2571,7 @@ async def functional_battle_royale(addrs, starter_packet, account_region, client
         raise
 
 # ═══════════════════════════ INFORMATIONAL ═══════════════════════════
-async def informational(addrs, starter_packet, key, iv, region="ID", max_reconnects=3):
+async def informational(addrs, starter_packet, key, iv, region="ID", max_reconnects=3, starter_provider=None):
     reconnects = 0
     ip, port = addrs.split(":")
     while True:
@@ -2574,6 +2581,11 @@ async def informational(addrs, starter_packet, key, iv, region="ID", max_reconne
             reader, writer = await asyncio.open_connection(rip, int(port))
             rs = writer.get_extra_info('socket')
             if rs: optimize_tcp_socket(rs)
+            if starter_provider:
+                try:
+                    _sp = await starter_provider()
+                    if _sp: starter_packet = _sp
+                except Exception: pass
             writer.write(bytes.fromhex(starter_packet)); await writer.drain()
             reconnects = 0
             try:
@@ -2669,7 +2681,7 @@ async def refresh_account_profile(ad_or_uid):
     except Exception: pass
 
 async def process_account_uid_pass(uid, password, persist=True):
-    cached = cache_get(uid)
+    cached = cache_get_for_connect(uid)
     if cached:
         # Cachés antiguas podían no conservar las credenciales de origen.
         # Completar estos campos permite reconstruir el token al caducar.
@@ -2745,7 +2757,7 @@ async def process_account_uid_pass(uid, password, persist=True):
 
 async def process_account_token(access_token):
     cache_key = f"tok_{access_token[:20]}"
-    cached = cache_get(cache_key)
+    cached = cache_get_for_connect(cache_key)
     if cached:
         # Completar metadatos de token_cache.json de versiones antiguas.
         cached.setdefault('auth_type', 'token')
@@ -2885,10 +2897,18 @@ async def run_account_worker(ad, label):
         tcp_chat = await build_tcp_startup_packet(
             ad['account_id'], ad['token'], ad['server_time'],
             ad['aes_ak'], ad['iv_i'], region=reg, typ='ChaT')
+        async def _chat_starter():
+            f = bot_state.account_credentials.get(acc_id)
+            if not f: return None
+            return await build_tcp_startup_packet(
+                f['account_id'], f['token'], f['server_time'],
+                f['aes_ak'], f['iv_i'], region=f.get('region', reg), typ='ChaT')
         info_task = asyncio.create_task(informational(ad['informational_addrs'], tcp_chat,
-                                                      ad['aes_ak'], ad['iv_i'], region=reg))
+                                                      ad['aes_ak'], ad['iv_i'], region=reg,
+                                                      starter_provider=_chat_starter))
         if ENABLE_HTTP_PING:
-            ping_task = asyncio.create_task(ping_worker(acc_id, ad['token'], ad['release_version'], region=reg))
+            ping_task = asyncio.create_task(ping_worker(acc_id, ad['token'], ad['release_version'], region=reg,
+                                                        token_provider=lambda: (bot_state.account_credentials.get(acc_id) or {}).get('token')))
             print_success(f"[PING] Started {acc_id}")
 
         async def exp_refresher():
